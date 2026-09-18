@@ -1,139 +1,33 @@
 // ============================================================================
-// Ultra Hi-Fi SPC Player (High-Res Audio Engine)
+// SPC Player - Main Thread Version (ScriptProcessorNode)
 // ============================================================================
 
-// ----------------------------------------------------------------------------
-// 1. 高音質オーディオエフェクト & 補間モジュール
-// ----------------------------------------------------------------------------
-const GAUSS_TABLE = [
-  0x000, 0x000, 0x001, 0x002, 0x003, 0x005, 0x008, 0x00b,
-  0x00e, 0x012, 0x016, 0x01a, 0x01e, 0x023, 0x028, 0x02e,
-  0x034, 0x03a, 0x040, 0x047, 0x04e, 0x056, 0x05e, 0x066,
-  0x06f, 0x078, 0x082, 0x08c, 0x097, 0x0a2, 0x0ad, 0x0b9,
-  0x0c5, 0x0d1, 0x0de, 0x0eb, 0x0f8, 0x106, 0x114, 0x122,
-  0x131, 0x140, 0x150, 0x160, 0x171, 0x182, 0x194, 0x1a6,
-  0x1b9, 0x1cc, 0x1df, 0x1f3, 0x207, 0x21c, 0x231, 0x246,
-  0x25c, 0x272, 0x289, 0x2a0, 0x2b7, 0x2cf, 0x2e7, 0x300,
-  0x319, 0x332, 0x34b, 0x365, 0x37f, 0x399, 0x3b3, 0x3cd,
-  0x3e7, 0x402, 0x41c, 0x436, 0x451, 0x46b, 0x485, 0x4a0,
-  0x4ba, 0x4d4, 0x4ee, 0x507, 0x521, 0x53a, 0x553, 0x56c,
-  0x585, 0x59d, 0x5b5, 0x5cd, 0x5e5, 0x5fc, 0x613, 0x62a,
-  0x640, 0x656, 0x66b, 0x680, 0x695, 0x6a9, 0x6bd, 0x6d1,
-  0x6e4, 0x6f7, 0x709, 0x71b, 0x72c, 0x73d, 0x74e, 0x75e,
-  0x76d, 0x77c, 0x78a, 0x798, 0x7a5, 0x7b2, 0x7be, 0x7ca,
-  0x7d5, 0x7e0, 0x7ea, 0x7f3, 0x7fc, 0x804, 0x80b, 0x812,
-  0x818, 0x81d, 0x822, 0x826, 0x829, 0x82c, 0x82e, 0x82f,
-];
-// 修正前: return (p0 * g0 + p1 * g1 + p2 * g2 + p3 * g3) >> 11;
-// 修正後:
-function gaussInterpolate(p0, p1, p2, p3, t) {
-  const idx = Math.floor(t * 255);
-  const g3 = GAUSS_TABLE[idx >> 1];
-  const g2 = GAUSS_TABLE[(511 - idx) >> 1];
-  const g1 = GAUSS_TABLE[(255 + idx) >> 1];
-  const g0 = GAUSS_TABLE[(255 - idx) >> 1];
-  return (p0 * g0 + p1 * g1 + p2 * g2 + p3 * g3) / 2048;
-}
-/**
- * 4点キュービック (Hermite) 補間関数
- * エイリアシングノイズを極限までカットし、ピッチ変更時の音を滑らかにします。
- */
-function cubicInterpolate(p0, p1, p2, p3, t) {
-  const a = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3;
-  const b = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
-  const c = -0.5 * p0 + 0.5 * p2;
-  const d = p1;
-  return a * t * t * t + b * t * t + c * t + d;
-}
-
-/**
- * 超高域エキサイター (Harmonic Exciter)
- * BRR圧縮や32kHz制限で失われた10kHz〜20kHzの倍音成分を疑似生成して音の空気感・輝きを復元します。
- */
-class HighFreqExciter {
-  constructor(sampleRate = 48000) {
-    this.hpL = 0; this.hpR = 0;
-    this.lpL = 0; this.lpR = 0;
-    const rcHp = 1.0 / (2 * Math.PI * 6000);
-    const dt = 1.0 / sampleRate;
-    this.alpha = dt / (rcHp + dt);
-    const rcLp = 1.0 / (2 * Math.PI * 14000);
-    this.beta = dt / (rcLp + dt);
-  }
-
-  process(l, r, drive = 1.1, mix = 0.12) {
-    this.hpL += this.alpha * (l - this.hpL);
-    this.hpR += this.alpha * (r - this.hpR);
-
-    const highL = (l - this.hpL) * drive;
-    const highR = (r - this.hpR) * drive;
-
-    const satL = Math.sin(Math.max(-1.57, Math.min(1.57, highL)));
-    const satR = Math.sin(Math.max(-1.57, Math.min(1.57, highR)));
-
-    this.lpL += this.beta * (satL - this.lpL);
-    this.lpR += this.beta * (satR - this.lpR);
-
-    return [l + this.lpL * mix, r + this.lpR * mix];
-  }
-}
-
-/**
- * ステレオサウンドステージ拡張器 (Soundstage Expander)
- * モノラル寄りの定位感を自然に左右・奥行きへ広げます。
- */
-class StereoExpander {
-  constructor(sampleRate = 48000) {
-    this.lpL = 0; this.lpR = 0;
-    const dt = 1.0 / sampleRate;
-    const rc = 1.0 / (2 * Math.PI * 200);
-    this.alpha = dt / (rc + dt);
-  }
-
-  process(l, r, width = 0.20) {
-    this.lpL += this.alpha * (l - this.lpL);
-    this.lpR += this.alpha * (r - this.lpR);
-    const bassMid = (this.lpL + this.lpR) * 0.5;
-
-    const highL = l - this.lpL;
-    const highR = r - this.lpR;
-
-    const mid = (highL + highR) * 0.5;
-    let side = (highL - highR) * 0.5;
-    side *= (1.0 + width);
-
-    return [bassMid + mid + side, bassMid + mid - side];
-  }
-}
-/**
- * クリーン・ソフトリミッター
- * 実機のMath.tanhによる極端な音の潰れ（飽和歪み）を防ぎ、透明感のある広いダイナミックレンジを保ちます。
- */
-function cleanSoftLimit(sample) {
-  const threshold = 0.82;
-  const abs = Math.abs(sample);
-  if (abs < threshold) return sample;
-  const sign = Math.sign(sample);
-  const a = abs - threshold;
-  return sign * (threshold + (1 - threshold) * Math.tanh(a / (1 - threshold)));
-}
-
-
 // ============================================================================
-// 2. SPC700 CPU エミュレータ (標準実装)
+// SPC700 CPU Emulator
 // ============================================================================
 class SPC700 {
   constructor(dsp) {
     this.dsp = dsp;
     this.ram = new Uint8Array(0x10000);
 
-    this.A = 0; this.X = 0; this.Y = 0; this.SP = 0; this.PC = 0;
-    this.flagN = 0; this.flagV = 0; this.flagP = 0; this.flagB = 0;
-    this.flagH = 0; this.flagI = 0; this.flagZ = 0; this.flagC = 0;
+    this.A = 0;
+    this.X = 0;
+    this.Y = 0;
+    this.SP = 0;
+    this.PC = 0;
+
+    this.flagN = 0;
+    this.flagV = 0;
+    this.flagP = 0;
+    this.flagB = 0;
+    this.flagH = 0;
+    this.flagI = 0;
+    this.flagZ = 0;
+    this.flagC = 0;
 
     this.ioPort = new Uint8Array(4);
-    this.ioIn = new Uint8Array(4);
-    this.ioOut = new Uint8Array(4);
+    this.ioIn = new Uint8Array(4);  // 追加：入力用ポート
+    this.ioOut = new Uint8Array(4); // 追加：出力用ポート
     this.timerEnable = [0, 0, 0];
     this.timerTarget = [0, 0, 0];
     this.timerCounter = [0, 0, 0];
@@ -148,16 +42,19 @@ class SPC700 {
     switch (addr) {
       case 0xf2: return this.dsp.regAddr;
       case 0xf3: return this.dsp.read(this.dsp.regAddr);
-      case 0xf4: case 0xf5: case 0xf6: case 0xf7: return this.ioIn[addr - 0xf4];
+      case 0xf4: case 0xf5: case 0xf6: case 0xf7:
+        return this.ioIn[addr - 0xf4];
       case 0xfd: return this.readTimerOut(0);
       case 0xfe: return this.readTimerOut(1);
       case 0xff: return this.readTimerOut(2);
-      default: return this.ram[addr];
+      default:
+        return this.ram[addr];
     }
   }
 
   write(addr, val) {
-    addr &= 0xffff; val &= 0xff;
+    addr &= 0xffff;
+    val &= 0xff;
     switch (addr) {
       case 0xf1:
         if (val & 0x10) { this.ioPort[0] = 0; this.ioPort[1] = 0; }
@@ -172,13 +69,23 @@ class SPC700 {
         }
         this.ram[addr] = val;
         break;
-      case 0xf2: this.dsp.regAddr = val; this.ram[addr] = val; break;
-      case 0xf3: this.dsp.write(this.dsp.regAddr, val); this.ram[addr] = val; break;
-      case 0xf4: case 0xf5: case 0xf6: case 0xf7: this.ioOut[addr - 0xf4] = val; this.ram[addr] = val; break;
+      case 0xf2:
+        this.dsp.regAddr = val;
+        this.ram[addr] = val;
+        break;
+      case 0xf3:
+        this.dsp.write(this.dsp.regAddr, val);
+        this.ram[addr] = val;
+        break;
+      case 0xf4: case 0xf5: case 0xf6: case 0xf7:
+        this.ioOut[addr - 0xf4] = val;
+        this.ram[addr] = val;
+        break;
       case 0xfa: this.timerTarget[0] = val === 0 ? 256 : val; this.ram[addr] = val; break;
       case 0xfb: this.timerTarget[1] = val === 0 ? 256 : val; this.ram[addr] = val; break;
       case 0xfc: this.timerTarget[2] = val === 0 ? 256 : val; this.ram[addr] = val; break;
-      default: this.ram[addr] = val;
+      default:
+        this.ram[addr] = val;
     }
   }
 
@@ -212,20 +119,33 @@ class SPC700 {
   }
 
   setPSW(v) {
-    this.flagN = (v >> 7) & 1; this.flagV = (v >> 6) & 1;
-    this.flagP = (v >> 5) & 1; this.flagB = (v >> 4) & 1;
-    this.flagH = (v >> 3) & 1; this.flagI = (v >> 2) & 1;
-    this.flagZ = (v >> 1) & 1; this.flagC = v & 1;
+    this.flagN = (v >> 7) & 1;
+    this.flagV = (v >> 6) & 1;
+    this.flagP = (v >> 5) & 1;
+    this.flagB = (v >> 4) & 1;
+    this.flagH = (v >> 3) & 1;
+    this.flagI = (v >> 2) & 1;
+    this.flagZ = (v >> 1) & 1;
+    this.flagC = v & 1;
   }
 
   dpBase() { return this.flagP ? 0x100 : 0x000; }
-  setNZ8(v) { v &= 0xff; this.flagZ = v === 0 ? 1 : 0; this.flagN = (v & 0x80) ? 1 : 0; return v; }
+
+  setNZ8(v) {
+    v &= 0xff;
+    this.flagZ = v === 0 ? 1 : 0;
+    this.flagN = (v & 0x80) ? 1 : 0;
+    return v;
+  }
+
   push8(v) { this.ram[0x100 + this.SP] = v & 0xff; this.SP = (this.SP - 1) & 0xff; }
   pop8() { this.SP = (this.SP + 1) & 0xff; return this.ram[0x100 + this.SP]; }
   push16(v) { this.push8((v >> 8) & 0xff); this.push8(v & 0xff); }
   pop16() { const lo = this.pop8(); const hi = this.pop8(); return (hi << 8) | lo; }
+
   fetch8() { const v = this.read(this.PC); this.PC = (this.PC + 1) & 0xffff; return v; }
   fetch16() { const lo = this.fetch8(); const hi = this.fetch8(); return (hi << 8) | lo; }
+
   dp(off) { return (this.dpBase() + off) & 0xffff; }
 
   adc(a, b, carryIn) {
@@ -238,7 +158,9 @@ class SPC700 {
     return r8;
   }
 
-  sbc(a, b, carryIn) { return this.adc(a, (~b) & 0xff, carryIn); }
+  sbc(a, b, carryIn) {
+    return this.adc(a, (~b) & 0xff, carryIn);
+  }
 
   step() {
     const op = this.fetch8();
@@ -250,7 +172,10 @@ class SPC700 {
 
   _exec(op) {
     const fn = this.opTable[op];
-    if (!fn) { console.error("UNKNOWN OPCODE", op.toString(16).padStart(2, "0")); return 2; }
+    if (!fn) {
+        console.error("UNKNOWN OPCODE", op.toString(16).padStart(2, "0"));
+        return 2;
+    }
     return fn.call(this);
   }
 
@@ -269,9 +194,9 @@ class SPC700 {
     const wr = (addr, v) => this.write(addr, v);
 
     T[0x00] = function () { return 2; };
-    T[0xE8] = function () { this.A = this.setNZ8(this.fetch8()); return 2; };
-    T[0xCD] = function () { this.X = this.setNZ8(this.fetch8()); return 2; };
-    T[0x8D] = function () { this.Y = this.setNZ8(this.fetch8()); return 2; };
+    T[0xE8] = function () { const v = this.fetch8(); this.A = this.setNZ8(v); return 2; };
+    T[0xCD] = function () { const v = this.fetch8(); this.X = this.setNZ8(v); return 2; };
+    T[0x8D] = function () { const v = this.fetch8(); this.Y = this.setNZ8(v); return 2; };
 
     T[0x7D] = function () { this.A = this.setNZ8(this.X); return 2; };
     T[0xDD] = function () { this.A = this.setNZ8(this.Y); return 2; };
@@ -280,57 +205,100 @@ class SPC700 {
     T[0x9D] = function () { this.X = this.setNZ8(this.SP); return 2; };
     T[0xBD] = function () { this.SP = this.X; return 2; };
 
-    T[0xC4] = function () { wr(this.dp(this.fetch8()), this.A); return 4; };
-    T[0xE4] = function () { this.A = this.setNZ8(rd(this.dp(this.fetch8()))); return 3; };
-    T[0xD8] = function () { wr(this.dp(this.fetch8()), this.X); return 4; };
-    T[0xF8] = function () { this.X = this.setNZ8(rd(this.dp(this.fetch8()))); return 3; };
-    T[0xCB] = function () { wr(this.dp(this.fetch8()), this.Y); return 4; };
-    T[0xEB] = function () { this.Y = this.setNZ8(rd(this.dp(this.fetch8()))); return 3; };
+    T[0xC4] = function () { const a = this.dp(this.fetch8()); wr(a, this.A); return 4; };
+    T[0xE4] = function () { const a = this.dp(this.fetch8()); this.A = this.setNZ8(rd(a)); return 3; };
+    T[0xD8] = function () { const a = this.dp(this.fetch8()); wr(a, this.X); return 4; };
+    T[0xF8] = function () { const a = this.dp(this.fetch8()); this.X = this.setNZ8(rd(a)); return 3; };
+    T[0xCB] = function () { const a = this.dp(this.fetch8()); wr(a, this.Y); return 4; };
+    T[0xEB] = function () { const a = this.dp(this.fetch8()); this.Y = this.setNZ8(rd(a)); return 3; };
 
-    T[0xD4] = function () { wr(this.dp((this.fetch8() + this.X) & 0xff), this.A); return 5; };
-    T[0xF4] = function () { this.A = this.setNZ8(rd(this.dp((this.fetch8() + this.X) & 0xff))); return 4; };
-    T[0xD9] = function () { wr(this.dp((this.fetch8() + this.Y) & 0xff), this.X); return 5; };
-    T[0xF9] = function () { this.X = this.setNZ8(rd(this.dp((this.fetch8() + this.Y) & 0xff))); return 4; };
-    T[0xDB] = function () { wr(this.dp((this.fetch8() + this.X) & 0xff), this.Y); return 5; };
-    T[0xFB] = function () { this.Y = this.setNZ8(rd(this.dp((this.fetch8() + this.X) & 0xff))); return 4; };
+    T[0xD4] = function () { const a = this.dp((this.fetch8() + this.X) & 0xff); wr(a, this.A); return 5; };
+    T[0xF4] = function () { const a = this.dp((this.fetch8() + this.X) & 0xff); this.A = this.setNZ8(rd(a)); return 4; };
+    T[0xD9] = function () { const a = this.dp((this.fetch8() + this.Y) & 0xff); wr(a, this.X); return 5; };
+    T[0xF9] = function () { const a = this.dp((this.fetch8() + this.Y) & 0xff); this.X = this.setNZ8(rd(a)); return 4; };
+    T[0xDB] = function () { const a = this.dp((this.fetch8() + this.X) & 0xff); wr(a, this.Y); return 5; };
+    T[0xFB] = function () { const a = this.dp((this.fetch8() + this.X) & 0xff); this.Y = this.setNZ8(rd(a)); return 4; };
 
-    T[0xC5] = function () { wr(this.fetch16(), this.A); return 5; };
-    T[0xE5] = function () { this.A = this.setNZ8(rd(this.fetch16())); return 4; };
-    T[0xC9] = function () { wr(this.fetch16(), this.X); return 5; };
-    T[0xE9] = function () { this.X = this.setNZ8(rd(this.fetch16())); return 4; };
-    T[0xCC] = function () { wr(this.fetch16(), this.Y); return 5; };
-    T[0xEC] = function () { this.Y = this.setNZ8(rd(this.fetch16())); return 4; };
+    T[0xC5] = function () { const a = this.fetch16(); wr(a, this.A); return 5; };
+    T[0xE5] = function () { const a = this.fetch16(); this.A = this.setNZ8(rd(a)); return 4; };
+    T[0xC9] = function () { const a = this.fetch16(); wr(a, this.X); return 5; };
+    T[0xE9] = function () { const a = this.fetch16(); this.X = this.setNZ8(rd(a)); return 4; };
+    T[0xCC] = function () { const a = this.fetch16(); wr(a, this.Y); return 5; };
+    T[0xEC] = function () { const a = this.fetch16(); this.Y = this.setNZ8(rd(a)); return 4; };
 
-    T[0xD5] = function () { wr((this.fetch16() + this.X) & 0xffff, this.A); return 6; };
-    T[0xD6] = function () { wr((this.fetch16() + this.Y) & 0xffff, this.A); return 6; };
-    T[0xF5] = function () { this.A = this.setNZ8(rd((this.fetch16() + this.X) & 0xffff)); return 5; };
-    T[0xF6] = function () { this.A = this.setNZ8(rd((this.fetch16() + this.Y) & 0xffff)); return 5; };
+    T[0xD5] = function () { const a = (this.fetch16() + this.X) & 0xffff; wr(a, this.A); return 6; };
+    T[0xD6] = function () { const a = (this.fetch16() + this.Y) & 0xffff; wr(a, this.A); return 6; };
+    T[0xF5] = function () { const a = (this.fetch16() + this.X) & 0xffff; this.A = this.setNZ8(rd(a)); return 5; };
+    T[0xF6] = function () { const a = (this.fetch16() + this.Y) & 0xffff; this.A = this.setNZ8(rd(a)); return 5; };
 
     T[0xC6] = function () { wr(this.dp(this.X), this.A); return 4; };
     T[0xE6] = function () { this.A = this.setNZ8(rd(this.dp(this.X))); return 3; };
     T[0xAF] = function () { wr(this.dp(this.X), this.A); this.X = (this.X + 1) & 0xff; return 4; };
     T[0xBF] = function () { this.A = this.setNZ8(rd(this.dp(this.X))); this.X = (this.X + 1) & 0xff; return 4; };
 
-    T[0xC7] = function () { const ptr = this.dp((this.fetch8() + this.X) & 0xff); const a = rd(ptr) | (rd((ptr + 1) & 0xffff) << 8); wr(a, this.A); return 7; };
-    T[0xE7] = function () { const ptr = this.dp((this.fetch8() + this.X) & 0xff); const a = rd(ptr) | (rd((ptr + 1) & 0xffff) << 8); this.A = this.setNZ8(rd(a)); return 6; };
-    T[0xD7] = function () { const ptr = this.dp(this.fetch8()); const base = rd(ptr) | (rd((ptr + 1) & 0xffff) << 8); wr((base + this.Y) & 0xffff, this.A); return 7; };
-    T[0xF7] = function () { const ptr = this.dp(this.fetch8()); const base = rd(ptr) | (rd((ptr + 1) & 0xffff) << 8); this.A = this.setNZ8(rd((base + this.Y) & 0xffff)); return 6; };
+    T[0xC7] = function () {
+      const ptr = this.dp((this.fetch8() + this.X) & 0xff);
+      const a = rd(ptr) | (rd((ptr + 1) & 0xffff) << 8);
+      wr(a, this.A); return 7;
+    };
+    T[0xE7] = function () {
+      const ptr = this.dp((this.fetch8() + this.X) & 0xff);
+      const a = rd(ptr) | (rd((ptr + 1) & 0xffff) << 8);
+      this.A = this.setNZ8(rd(a)); return 6;
+    };
+    T[0xD7] = function () {
+      const ptr = this.dp(this.fetch8());
+      const base = rd(ptr) | (rd((ptr + 1) & 0xffff) << 8);
+      const a = (base + this.Y) & 0xffff;
+      wr(a, this.A); return 7;
+    };
+    T[0xF7] = function () {
+      const ptr = this.dp(this.fetch8());
+      const base = rd(ptr) | (rd((ptr + 1) & 0xffff) << 8);
+      const a = (base + this.Y) & 0xffff;
+      this.A = this.setNZ8(rd(a)); return 6;
+    };
 
-    T[0xFA] = function () { const src = this.dp(this.fetch8()); wr(this.dp(this.fetch8()), rd(src)); return 5; };
-    T[0x8F] = function () { const v = this.fetch8(); wr(this.dp(this.fetch8()), v); return 5; };
+    T[0xFA] = function () { const src = this.dp(this.fetch8()); const dst = this.dp(this.fetch8()); wr(dst, rd(src)); return 5; };
+    T[0x8F] = function () { const v = this.fetch8(); const a = this.dp(this.fetch8()); wr(a, v); return 5; };
 
     T[0xBA] = function () {
-      const a = this.dp(this.fetch8()); const lo = rd(a); const hi = rd((a + 1) & 0xffff);
-      this.A = lo; this.Y = hi; const w = (hi << 8) | lo;
-      this.flagZ = w === 0 ? 1 : 0; this.flagN = (hi & 0x80) ? 1 : 0;
+      const a = this.dp(this.fetch8());
+      const lo = rd(a); const hi = rd((a + 1) & 0xffff);
+      this.A = lo; this.Y = hi;
+      const w = (hi << 8) | lo;
+      this.flagZ = w === 0 ? 1 : 0;
+      this.flagN = (hi & 0x80) ? 1 : 0;
       return 5;
     };
-    T[0xDA] = function () { const a = this.dp(this.fetch8()); wr(a, this.A); wr((a + 1) & 0xffff, this.Y); return 5; };
-    T[0x3A] = function () { const a = this.dp(this.fetch8()); let w = (rd(a) | (rd((a + 1) & 0xffff) << 8)) + 1 & 0xffff; wr(a, w & 0xff); wr((a + 1) & 0xffff, (w >> 8) & 0xff); this.flagZ = w === 0 ? 1 : 0; this.flagN = (w & 0x8000) ? 1 : 0; return 6; };
-    T[0x1A] = function () { const a = this.dp(this.fetch8()); let w = (rd(a) | (rd((a + 1) & 0xffff) << 8)) - 1 & 0xffff; wr(a, w & 0xff); wr((a + 1) & 0xffff, (w >> 8) & 0xff); this.flagZ = w === 0 ? 1 : 0; this.flagN = (w & 0x8000) ? 1 : 0; return 6; };
+    T[0xDA] = function () {
+      const a = this.dp(this.fetch8());
+      wr(a, this.A); wr((a + 1) & 0xffff, this.Y);
+      return 5;
+    };
+    T[0x3A] = function () {
+      const a = this.dp(this.fetch8());
+      let w = (rd(a) | (rd((a + 1) & 0xffff) << 8));
+      w = (w + 1) & 0xffff;
+      wr(a, w & 0xff); wr((a + 1) & 0xffff, (w >> 8) & 0xff);
+      this.flagZ = w === 0 ? 1 : 0; this.flagN = (w & 0x8000) ? 1 : 0;
+      return 6;
+    };
+    T[0x1A] = function () {
+      const a = this.dp(this.fetch8());
+      let w = (rd(a) | (rd((a + 1) & 0xffff) << 8));
+      w = (w - 1) & 0xffff;
+      wr(a, w & 0xff); wr((a + 1) & 0xffff, (w >> 8) & 0xff);
+      this.flagZ = w === 0 ? 1 : 0; this.flagN = (w & 0x8000) ? 1 : 0;
+      return 6;
+    };
     T[0x7A] = function () {
-      const a = this.dp(this.fetch8()); const ya = (this.Y << 8) | this.A; const m = (rd(a) | (rd((a + 1) & 0xffff) << 8));
-      const result = ya + m; this.flagC = result > 0xffff ? 1 : 0; const r16 = result & 0xffff;
+      const a = this.dp(this.fetch8());
+      const ya = (this.Y << 8) | this.A;
+      const m = (rd(a) | (rd((a + 1) & 0xffff) << 8));
+      const result = ya + m;
+      this.flagC = result > 0xffff ? 1 : 0;
+      const r16 = result & 0xffff;
       this.flagV = (~(ya ^ m) & (ya ^ r16) & 0x8000) ? 1 : 0;
       this.flagH = (((ya & 0xfff) + (m & 0xfff)) > 0xfff) ? 1 : 0;
       this.Y = (r16 >> 8) & 0xff; this.A = r16 & 0xff;
@@ -338,8 +306,13 @@ class SPC700 {
       return 5;
     };
     T[0x9A] = function () {
-      const a = this.dp(this.fetch8()); const ya = (this.Y << 8) | this.A; const m = (rd(a) | (rd((a + 1) & 0xffff) << 8));
-      const mInv = (~m) & 0xffff; const result = ya + mInv + 1; this.flagC = result > 0xffff ? 1 : 0; const r16 = result & 0xffff;
+      const a = this.dp(this.fetch8());
+      const ya = (this.Y << 8) | this.A;
+      const m = (rd(a) | (rd((a + 1) & 0xffff) << 8));
+      const mInv = (~m) & 0xffff;
+      const result = ya + mInv + 1;
+      this.flagC = result > 0xffff ? 1 : 0;
+      const r16 = result & 0xffff;
       this.flagV = (~(ya ^ mInv) & (ya ^ r16) & 0x8000) ? 1 : 0;
       this.flagH = (((ya & 0xfff) + (mInv & 0xfff) + 1) > 0xfff) ? 1 : 0;
       this.Y = (r16 >> 8) & 0xff; this.A = r16 & 0xff;
@@ -347,72 +320,77 @@ class SPC700 {
       return 5;
     };
     T[0x5A] = function () {
-      const a = this.dp(this.fetch8()); const ya = (this.Y << 8) | this.A; const m = (rd(a) | (rd((a + 1) & 0xffff) << 8));
-      const result = (ya - m) & 0xffff; this.flagC = ya >= m ? 1 : 0; this.flagZ = result === 0 ? 1 : 0; this.flagN = (result & 0x8000) ? 1 : 0;
+      const a = this.dp(this.fetch8());
+      const ya = (this.Y << 8) | this.A;
+      const m = (rd(a) | (rd((a + 1) & 0xffff) << 8));
+      const result = (ya - m) & 0xffff;
+      this.flagC = ya >= m ? 1 : 0;
+      this.flagZ = result === 0 ? 1 : 0;
+      this.flagN = (result & 0x8000) ? 1 : 0;
       return 4;
     };
 
-    T[0x08] = function () { this.A = this.setNZ8(this.A | this.fetch8()); return 2; };
-    T[0x28] = function () { this.A = this.setNZ8(this.A & this.fetch8()); return 2; };
-    T[0x48] = function () { this.A = this.setNZ8(this.A ^ this.fetch8()); return 2; };
-    T[0x68] = function () { const v = this.fetch8(); this.flagC = this.A >= v ? 1 : 0; this.setNZ8((this.A - v) & 0x1ff); return 2; };
-    T[0x88] = function () { this.A = this.adc(this.A, this.fetch8(), this.flagC); return 2; };
-    T[0xA8] = function () { this.A = this.sbc(this.A, this.fetch8(), this.flagC); return 2; };
+    T[0x08] = function () { const v = this.fetch8(); this.A = this.setNZ8(this.A | v); return 2; };
+    T[0x28] = function () { const v = this.fetch8(); this.A = this.setNZ8(this.A & v); return 2; };
+    T[0x48] = function () { const v = this.fetch8(); this.A = this.setNZ8(this.A ^ v); return 2; };
+    T[0x68] = function () { const v = this.fetch8(); const r = (this.A - v) & 0x1ff; this.flagC = this.A >= v ? 1 : 0; this.setNZ8(r); return 2; };
+    T[0x88] = function () { const v = this.fetch8(); this.A = this.adc(this.A, v, this.flagC); return 2; };
+    T[0xA8] = function () { const v = this.fetch8(); this.A = this.sbc(this.A, v, this.flagC); return 2; };
 
-    T[0x04] = function () { this.A = this.setNZ8(this.A | rd(this.dp(this.fetch8()))); return 3; };
-    T[0x24] = function () { this.A = this.setNZ8(this.A & rd(this.dp(this.fetch8()))); return 3; };
-    T[0x44] = function () { this.A = this.setNZ8(this.A ^ rd(this.dp(this.fetch8()))); return 3; };
+    T[0x04] = function () { const v = rd(this.dp(this.fetch8())); this.A = this.setNZ8(this.A | v); return 3; };
+    T[0x24] = function () { const v = rd(this.dp(this.fetch8())); this.A = this.setNZ8(this.A & v); return 3; };
+    T[0x44] = function () { const v = rd(this.dp(this.fetch8())); this.A = this.setNZ8(this.A ^ v); return 3; };
     T[0x64] = function () { const v = rd(this.dp(this.fetch8())); this.flagC = this.A >= v ? 1 : 0; this.setNZ8((this.A - v) & 0x1ff); return 3; };
-    T[0x84] = function () { this.A = this.adc(this.A, rd(this.dp(this.fetch8())), this.flagC); return 3; };
-    T[0xA4] = function () { this.A = this.sbc(this.A, rd(this.dp(this.fetch8())), this.flagC); return 3; };
+    T[0x84] = function () { const v = rd(this.dp(this.fetch8())); this.A = this.adc(this.A, v, this.flagC); return 3; };
+    T[0xA4] = function () { const v = rd(this.dp(this.fetch8())); this.A = this.sbc(this.A, v, this.flagC); return 3; };
 
-    T[0x14] = function () { this.A = this.setNZ8(this.A | rd(this.dp((this.fetch8() + this.X) & 0xff))); return 4; };
-    T[0x34] = function () { this.A = this.setNZ8(this.A & rd(this.dp((this.fetch8() + this.X) & 0xff))); return 4; };
-    T[0x54] = function () { this.A = this.setNZ8(this.A ^ rd(this.dp((this.fetch8() + this.X) & 0xff))); return 4; };
+    T[0x14] = function () { const v = rd(this.dp((this.fetch8() + this.X) & 0xff)); this.A = this.setNZ8(this.A | v); return 4; };
+    T[0x34] = function () { const v = rd(this.dp((this.fetch8() + this.X) & 0xff)); this.A = this.setNZ8(this.A & v); return 4; };
+    T[0x54] = function () { const v = rd(this.dp((this.fetch8() + this.X) & 0xff)); this.A = this.setNZ8(this.A ^ v); return 4; };
     T[0x74] = function () { const v = rd(this.dp((this.fetch8() + this.X) & 0xff)); this.flagC = this.A >= v ? 1 : 0; this.setNZ8((this.A - v) & 0x1ff); return 4; };
-    T[0x94] = function () { this.A = this.adc(this.A, rd(this.dp((this.fetch8() + this.X) & 0xff)), this.flagC); return 4; };
-    T[0xB4] = function () { this.A = this.sbc(this.A, rd(this.dp((this.fetch8() + this.X) & 0xff)), this.flagC); return 4; };
+    T[0x94] = function () { const v = rd(this.dp((this.fetch8() + this.X) & 0xff)); this.A = this.adc(this.A, v, this.flagC); return 4; };
+    T[0xB4] = function () { const v = rd(this.dp((this.fetch8() + this.X) & 0xff)); this.A = this.sbc(this.A, v, this.flagC); return 4; };
 
-    T[0x05] = function () { this.A = this.setNZ8(this.A | rd(this.fetch16())); return 4; };
-    T[0x25] = function () { this.A = this.setNZ8(this.A & rd(this.fetch16())); return 4; };
-    T[0x45] = function () { this.A = this.setNZ8(this.A ^ rd(this.fetch16())); return 4; };
+    T[0x05] = function () { const v = rd(this.fetch16()); this.A = this.setNZ8(this.A | v); return 4; };
+    T[0x25] = function () { const v = rd(this.fetch16()); this.A = this.setNZ8(this.A & v); return 4; };
+    T[0x45] = function () { const v = rd(this.fetch16()); this.A = this.setNZ8(this.A ^ v); return 4; };
     T[0x65] = function () { const v = rd(this.fetch16()); this.flagC = this.A >= v ? 1 : 0; this.setNZ8((this.A - v) & 0x1ff); return 4; };
-    T[0x85] = function () { this.A = this.adc(this.A, rd(this.fetch16()), this.flagC); return 4; };
-    T[0xA5] = function () { this.A = this.sbc(this.A, rd(this.fetch16()), this.flagC); return 4; };
+    T[0x85] = function () { const v = rd(this.fetch16()); this.A = this.adc(this.A, v, this.flagC); return 4; };
+    T[0xA5] = function () { const v = rd(this.fetch16()); this.A = this.sbc(this.A, v, this.flagC); return 4; };
 
-    T[0x15] = function () { this.A = this.setNZ8(this.A | rd((this.fetch16() + this.X) & 0xffff)); return 5; };
-    T[0x16] = function () { this.A = this.setNZ8(this.A | rd((this.fetch16() + this.Y) & 0xffff)); return 5; };
-    T[0x35] = function () { this.A = this.setNZ8(this.A & rd((this.fetch16() + this.X) & 0xffff)); return 5; };
-    T[0x36] = function () { this.A = this.setNZ8(this.A & rd((this.fetch16() + this.Y) & 0xffff)); return 5; };
-    T[0x55] = function () { this.A = this.setNZ8(this.A ^ rd((this.fetch16() + this.X) & 0xffff)); return 5; };
-    T[0x56] = function () { this.A = this.setNZ8(this.A ^ rd((this.fetch16() + this.Y) & 0xffff)); return 5; };
+    T[0x15] = function () { const v = rd((this.fetch16() + this.X) & 0xffff); this.A = this.setNZ8(this.A | v); return 5; };
+    T[0x16] = function () { const v = rd((this.fetch16() + this.Y) & 0xffff); this.A = this.setNZ8(this.A | v); return 5; };
+    T[0x35] = function () { const v = rd((this.fetch16() + this.X) & 0xffff); this.A = this.setNZ8(this.A & v); return 5; };
+    T[0x36] = function () { const v = rd((this.fetch16() + this.Y) & 0xffff); this.A = this.setNZ8(this.A & v); return 5; };
+    T[0x55] = function () { const v = rd((this.fetch16() + this.X) & 0xffff); this.A = this.setNZ8(this.A ^ v); return 5; };
+    T[0x56] = function () { const v = rd((this.fetch16() + this.Y) & 0xffff); this.A = this.setNZ8(this.A ^ v); return 5; };
     T[0x75] = function () { const v = rd((this.fetch16() + this.X) & 0xffff); this.flagC = this.A >= v ? 1 : 0; this.setNZ8((this.A - v) & 0x1ff); return 5; };
     T[0x76] = function () { const v = rd((this.fetch16() + this.Y) & 0xffff); this.flagC = this.A >= v ? 1 : 0; this.setNZ8((this.A - v) & 0x1ff); return 5; };
-    T[0x95] = function () { this.A = this.adc(this.A, rd((this.fetch16() + this.X) & 0xffff), this.flagC); return 5; };
-    T[0x96] = function () { this.A = this.adc(this.A, rd((this.fetch16() + this.Y) & 0xffff), this.flagC); return 5; };
-    T[0xB5] = function () { this.A = this.sbc(this.A, rd((this.fetch16() + this.X) & 0xffff), this.flagC); return 5; };
-    T[0xB6] = function () { this.A = this.sbc(this.A, rd((this.fetch16() + this.Y) & 0xffff), this.flagC); return 5; };
+    T[0x95] = function () { const v = rd((this.fetch16() + this.X) & 0xffff); this.A = this.adc(this.A, v, this.flagC); return 5; };
+    T[0x96] = function () { const v = rd((this.fetch16() + this.Y) & 0xffff); this.A = this.adc(this.A, v, this.flagC); return 5; };
+    T[0xB5] = function () { const v = rd((this.fetch16() + this.X) & 0xffff); this.A = this.sbc(this.A, v, this.flagC); return 5; };
+    T[0xB6] = function () { const v = rd((this.fetch16() + this.Y) & 0xffff); this.A = this.sbc(this.A, v, this.flagC); return 5; };
 
-    T[0x06] = function () { this.A = this.setNZ8(this.A | rd(this.dp(this.X))); return 3; };
-    T[0x26] = function () { this.A = this.setNZ8(this.A & rd(this.dp(this.X))); return 3; };
-    T[0x46] = function () { this.A = this.setNZ8(this.A ^ rd(this.dp(this.X))); return 3; };
+    T[0x06] = function () { const v = rd(this.dp(this.X)); this.A = this.setNZ8(this.A | v); return 3; };
+    T[0x26] = function () { const v = rd(this.dp(this.X)); this.A = this.setNZ8(this.A & v); return 3; };
+    T[0x46] = function () { const v = rd(this.dp(this.X)); this.A = this.setNZ8(this.A ^ v); return 3; };
     T[0x66] = function () { const v = rd(this.dp(this.X)); this.flagC = this.A >= v ? 1 : 0; this.setNZ8((this.A - v) & 0x1ff); return 3; };
-    T[0x86] = function () { this.A = this.adc(this.A, rd(this.dp(this.X)), this.flagC); return 3; };
-    T[0xA6] = function () { this.A = this.sbc(this.A, rd(this.dp(this.X)), this.flagC); return 3; };
+    T[0x86] = function () { const v = rd(this.dp(this.X)); this.A = this.adc(this.A, v, this.flagC); return 3; };
+    T[0xA6] = function () { const v = rd(this.dp(this.X)); this.A = this.sbc(this.A, v, this.flagC); return 3; };
 
-    T[0x07] = function () { const ptr = this.dp((this.fetch8() + this.X) & 0xff); const a = rd(ptr) | (rd((ptr+1)&0xffff)<<8); this.A = this.setNZ8(this.A | rd(a)); return 6; };
-    T[0x27] = function () { const ptr = this.dp((this.fetch8() + this.X) & 0xff); const a = rd(ptr) | (rd((ptr+1)&0xffff)<<8); this.A = this.setNZ8(this.A & rd(a)); return 6; };
-    T[0x47] = function () { const ptr = this.dp((this.fetch8() + this.X) & 0xff); const a = rd(ptr) | (rd((ptr+1)&0xffff)<<8); this.A = this.setNZ8(this.A ^ rd(a)); return 6; };
+    T[0x07] = function () { const ptr = this.dp((this.fetch8() + this.X) & 0xff); const a = rd(ptr) | (rd((ptr+1)&0xffff)<<8); const v = rd(a); this.A = this.setNZ8(this.A | v); return 6; };
+    T[0x27] = function () { const ptr = this.dp((this.fetch8() + this.X) & 0xff); const a = rd(ptr) | (rd((ptr+1)&0xffff)<<8); const v = rd(a); this.A = this.setNZ8(this.A & v); return 6; };
+    T[0x47] = function () { const ptr = this.dp((this.fetch8() + this.X) & 0xff); const a = rd(ptr) | (rd((ptr+1)&0xffff)<<8); const v = rd(a); this.A = this.setNZ8(this.A ^ v); return 6; };
     T[0x67] = function () { const ptr = this.dp((this.fetch8() + this.X) & 0xff); const a = rd(ptr) | (rd((ptr+1)&0xffff)<<8); const v = rd(a); this.flagC = this.A >= v ? 1 : 0; this.setNZ8((this.A - v) & 0x1ff); return 6; };
-    T[0x87] = function () { const ptr = this.dp((this.fetch8() + this.X) & 0xff); const a = rd(ptr) | (rd((ptr+1)&0xffff)<<8); this.A = this.adc(this.A, rd(a), this.flagC); return 6; };
-    T[0xA7] = function () { const ptr = this.dp((this.fetch8() + this.X) & 0xff); const a = rd(ptr) | (rd((ptr+1)&0xffff)<<8); this.A = this.sbc(this.A, rd(a), this.flagC); return 6; };
+    T[0x87] = function () { const ptr = this.dp((this.fetch8() + this.X) & 0xff); const a = rd(ptr) | (rd((ptr+1)&0xffff)<<8); const v = rd(a); this.A = this.adc(this.A, v, this.flagC); return 6; };
+    T[0xA7] = function () { const ptr = this.dp((this.fetch8() + this.X) & 0xff); const a = rd(ptr) | (rd((ptr+1)&0xffff)<<8); const v = rd(a); this.A = this.sbc(this.A, v, this.flagC); return 6; };
 
-    T[0x17] = function () { const ptr = this.dp(this.fetch8()); const base = rd(ptr) | (rd((ptr+1)&0xffff)<<8); this.A = this.setNZ8(this.A | rd((base+this.Y)&0xffff)); return 6; };
-    T[0x37] = function () { const ptr = this.dp(this.fetch8()); const base = rd(ptr) | (rd((ptr+1)&0xffff)<<8); this.A = this.setNZ8(this.A & rd((base+this.Y)&0xffff)); return 6; };
-    T[0x57] = function () { const ptr = this.dp(this.fetch8()); const base = rd(ptr) | (rd((ptr+1)&0xffff)<<8); this.A = this.setNZ8(this.A ^ rd((base+this.Y)&0xffff)); return 6; };
+    T[0x17] = function () { const ptr = this.dp(this.fetch8()); const base = rd(ptr) | (rd((ptr+1)&0xffff)<<8); const v = rd((base+this.Y)&0xffff); this.A = this.setNZ8(this.A | v); return 6; };
+    T[0x37] = function () { const ptr = this.dp(this.fetch8()); const base = rd(ptr) | (rd((ptr+1)&0xffff)<<8); const v = rd((base+this.Y)&0xffff); this.A = this.setNZ8(this.A & v); return 6; };
+    T[0x57] = function () { const ptr = this.dp(this.fetch8()); const base = rd(ptr) | (rd((ptr+1)&0xffff)<<8); const v = rd((base+this.Y)&0xffff); this.A = this.setNZ8(this.A ^ v); return 6; };
     T[0x77] = function () { const ptr = this.dp(this.fetch8()); const base = rd(ptr) | (rd((ptr+1)&0xffff)<<8); const v = rd((base+this.Y)&0xffff); this.flagC = this.A >= v ? 1 : 0; this.setNZ8((this.A - v) & 0x1ff); return 6; };
-    T[0x97] = function () { const ptr = this.dp(this.fetch8()); const base = rd(ptr) | (rd((ptr+1)&0xffff)<<8); this.A = this.adc(this.A, rd((base+this.Y)&0xffff), this.flagC); return 6; };
-    T[0xB7] = function () { const ptr = this.dp(this.fetch8()); const base = rd(ptr) | (rd((ptr+1)&0xffff)<<8); this.A = this.sbc(this.A, rd((base+this.Y)&0xffff), this.flagC); return 6; };
+    T[0x97] = function () { const ptr = this.dp(this.fetch8()); const base = rd(ptr) | (rd((ptr+1)&0xffff)<<8); const v = rd((base+this.Y)&0xffff); this.A = this.adc(this.A, v, this.flagC); return 6; };
+    T[0xB7] = function () { const ptr = this.dp(this.fetch8()); const base = rd(ptr) | (rd((ptr+1)&0xffff)<<8); const v = rd((base+this.Y)&0xffff); this.A = this.sbc(this.A, v, this.flagC); return 6; };
 
     T[0x09] = function () { const src = this.dp(this.fetch8()); const dst = this.dp(this.fetch8()); wr(dst, this.setNZ8(rd(dst) | rd(src))); return 6; };
     T[0x29] = function () { const src = this.dp(this.fetch8()); const dst = this.dp(this.fetch8()); wr(dst, this.setNZ8(rd(dst) & rd(src))); return 6; };
@@ -486,31 +464,39 @@ class SPC700 {
     T[0xCF] = function () {
       const r = (this.Y & 0xff) * (this.A & 0xff);
       this.A = r & 0xff; this.Y = (r >> 8) & 0xff;
-      this.setNZ8(this.Y); return 9;
+      this.setNZ8(this.Y);
+      return 9;
     };
     T[0x9E] = function () {
-      let ya = (this.Y << 8) | this.A; const x = this.X;
-      if (x === 0) {
-        this.A = 0xff; this.Y = 0xff; this.flagV = 1; this.flagH = 1; this.setNZ8(this.A); return 12;
+      const ya = (this.Y << 8) | this.A;
+      const x = this.X;
+      let quotient = 0xffff;
+      let remainder = ya & 0xff;
+      if (x !== 0) {
+        quotient = Math.floor(ya / x) & 0xffff;
+        remainder = ya % x;
       }
-      this.flagH = ((this.Y & 0xf) >= (x & 0xf)) ? 1 : 0;
-      const quotient = Math.floor(ya / x); const remainder = ya % x;
       this.flagV = quotient > 0xff ? 1 : 0;
-      this.A = quotient & 0xff; this.Y = remainder & 0xff;
-      this.setNZ8(this.A); return 12;
+      this.flagH = ((this.Y & 0xf) <= (x & 0xf)) ? 1 : 0;
+      this.A = quotient & 0xff;
+      this.Y = remainder & 0xff;
+      this.setNZ8(this.A);
+      return 12;
     };
 
     T[0xDF] = function () {
       let a = this.A;
       if (this.flagC || a > 0x99) { a = (a + 0x60) & 0xff; this.flagC = 1; }
       if (this.flagH || (a & 0x0f) > 9) { a = (a + 0x06) & 0xff; }
-      this.A = this.setNZ8(a); return 3;
+      this.A = this.setNZ8(a);
+      return 3;
     };
     T[0xBE] = function () {
       let a = this.A;
       if (!this.flagC || a > 0x99) { a = (a - 0x60) & 0xff; this.flagC = 0; }
       if (!this.flagH || (a & 0x0f) > 9) { a = (a - 0x06) & 0xff; }
-      this.A = this.setNZ8(a); return 3;
+      this.A = this.setNZ8(a);
+      return 3;
     };
 
     T[0x60] = function () { this.flagC = 0; return 2; };
@@ -542,16 +528,25 @@ class SPC700 {
     T[0x10] = function () { const d = this.fetch8(); return 2 + this._branch(this.flagN===0, d); };
 
     for (let bit = 0; bit < 8; bit++) {
-      const opSet = 0x03 | (bit << 5); const opClr = 0x13 | (bit << 5);
-      T[opSet] = function () { const a = this.dp(this.fetch8()); const d = this.fetch8(); const v = rd(a); return 5 + this._branch(((v >> bit) & 1) === 1, d); };
-      T[opClr] = function () { const a = this.dp(this.fetch8()); const d = this.fetch8(); const v = rd(a); return 5 + this._branch(((v >> bit) & 1) === 0, d); };
+      const opSet = 0x03 | (bit << 5);
+      const opClr = 0x13 | (bit << 5);
+      T[opSet] = function () {
+        const a = this.dp(this.fetch8()); const d = this.fetch8();
+        const v = rd(a);
+        return 5 + this._branch(((v >> bit) & 1) === 1, d);
+      };
+      T[opClr] = function () {
+        const a = this.dp(this.fetch8()); const d = this.fetch8();
+        const v = rd(a);
+        return 5 + this._branch(((v >> bit) & 1) === 0, d);
+      };
     }
 
-    T[0x2E] = function () { const a=this.dp(this.fetch8()); const d=this.fetch8(); return 5 + this._branch(this.A!==rd(a), d); };
-    T[0xDE] = function () { const a=this.dp((this.fetch8()+this.X)&0xff); const d=this.fetch8(); return 6 + this._branch(this.A!==rd(a), d); };
+    T[0x2E] = function () { const a=this.dp(this.fetch8()); const d=this.fetch8(); const v=rd(a); return 5 + this._branch(this.A!==v, d); };
+    T[0xDE] = function () { const a=this.dp((this.fetch8()+this.X)&0xff); const d=this.fetch8(); const v=rd(a); return 6 + this._branch(this.A!==v, d); };
 
     T[0xFE] = function () { const d=this.fetch8(); this.Y=(this.Y-1)&0xff; return 4 + this._branch(this.Y!==0, d); };
-    T[0x6E] = function () { const a=this.dp(this.fetch8()); const d=this.fetch8(); let v=(rd(a)-1)&0xff; wr(a,v); return 5 + this._branch(v!==0, d); };
+    T[0x6E] = function () { const a=this.dp(this.fetch8()); const d=this.fetch8(); let v=rd(a); v=(v-1)&0xff; wr(a,v); return 5 + this._branch(v!==0, d); };
 
     T[0x5F] = function () { this.PC = this.fetch16(); return 3; };
     T[0x1F] = function () { const base = this.fetch16(); const ptr=(base+this.X)&0xffff; this.PC = rd(ptr) | (rd((ptr+1)&0xffff)<<8); return 6; };
@@ -563,7 +558,9 @@ class SPC700 {
       T[op] = function () {
         const vecAddr = 0xFFDE - n * 2;
         const target = rd(vecAddr) | (rd((vecAddr + 1) & 0xffff) << 8);
-        this.push16(this.PC); this.PC = target; return 8;
+        this.push16(this.PC);
+        this.PC = target;
+        return 8;
       };
     }
 
@@ -571,53 +568,73 @@ class SPC700 {
     T[0x7F] = function () { this.setPSW(this.pop8()); this.PC = this.pop16(); return 6; };
 
     T[0x0F] = function () {
-      this.push16(this.PC); this.push8(this.getPSW());
+      this.push16(this.PC);
+      this.push8(this.getPSW());
       this.flagB = 1; this.flagI = 0;
-      this.PC = rd(0xFFDE) | (rd(0xFFDF) << 8); return 8;
+      this.PC = rd(0xFFDE) | (rd(0xFFDF) << 8);
+      return 8;
     };
 
     T[0xEF] = function () { this._stopped = true; return 3; };
     T[0xFF] = function () { this._stopped = true; return 3; };
 
-    T[0xAA] = function () { const w = this.fetch16(); this.flagC = (rd(w & 0x1fff) >> ((w >> 13) & 7)) & 1; return 4; };
+    T[0xAA] = function () {
+      const w = this.fetch16(); const addr = w & 0x1fff; const bit = (w >> 13) & 7;
+      const v = rd(addr);
+      this.flagC = (v >> bit) & 1;
+      return 4;
+    };
     T[0xCA] = function () {
       const w = this.fetch16(); const addr = w & 0x1fff; const bit = (w >> 13) & 7;
-      let v = rd(addr); if (this.flagC) v |= (1 << bit); else v &= ~(1 << bit);
-      wr(addr, v & 0xff); return 6;
+      let v = rd(addr);
+      if (this.flagC) v |= (1 << bit); else v &= ~(1 << bit);
+      wr(addr, v & 0xff);
+      return 6;
     };
 
-    T[0x4A] = function () { const w=this.fetch16(); this.flagC &= (rd(w&0x1fff)>>((w>>13)&7))&1; return 4; };
-    T[0x6A] = function () { const w=this.fetch16(); this.flagC &= ((rd(w&0x1fff)>>((w>>13)&7))&1)^1; return 4; };
-    T[0x0A] = function () { const w=this.fetch16(); this.flagC |= (rd(w&0x1fff)>>((w>>13)&7))&1; return 5; };
-    T[0x2A] = function () { const w=this.fetch16(); this.flagC |= ((rd(w&0x1fff)>>((w>>13)&7))&1)^1; return 5; };
-    T[0x8A] = function () { const w=this.fetch16(); this.flagC ^= (rd(w&0x1fff)>>((w>>13)&7))&1; return 5; };
+    T[0x4A] = function () { const w=this.fetch16(); const addr=w&0x1fff; const bit=(w>>13)&7; const v=(rd(addr)>>bit)&1; this.flagC = this.flagC & v; return 4; };
+    T[0x6A] = function () { const w=this.fetch16(); const addr=w&0x1fff; const bit=(w>>13)&7; const v=(rd(addr)>>bit)&1; this.flagC = this.flagC & (v^1); return 4; };
+    T[0x0A] = function () { const w=this.fetch16(); const addr=w&0x1fff; const bit=(w>>13)&7; const v=(rd(addr)>>bit)&1; this.flagC = this.flagC | v; return 5; };
+    T[0x2A] = function () { const w=this.fetch16(); const addr=w&0x1fff; const bit=(w>>13)&7; const v=(rd(addr)>>bit)&1; this.flagC = this.flagC | (v^1); return 5; };
+    T[0x8A] = function () { const w=this.fetch16(); const addr=w&0x1fff; const bit=(w>>13)&7; const v=(rd(addr)>>bit)&1; this.flagC = this.flagC ^ v; return 5; };
 
-    T[0xEA] = function () { const w=this.fetch16(); const addr=w&0x1fff; const bit=(w>>13)&7; wr(addr, rd(addr)^(1<<bit)); return 5; };
+    T[0xEA] = function () { const w=this.fetch16(); const addr=w&0x1fff; const bit=(w>>13)&7; let v=rd(addr); v ^= (1<<bit); wr(addr, v&0xff); return 5; };
 
     for (let bit = 0; bit < 8; bit++) {
-      const opSet = 0x02 | (bit << 5); const opClr = 0x12 | (bit << 5);
-      T[opSet] = function () { const a=this.dp(this.fetch8()); wr(a, rd(a) | (1<<bit)); return 4; };
-      T[opClr] = function () { const a=this.dp(this.fetch8()); wr(a, rd(a) & ~(1<<bit)); return 4; };
+      const opSet = 0x02 | (bit << 5);
+      const opClr = 0x12 | (bit << 5);
+      T[opSet] = function () { const a=this.dp(this.fetch8()); let v=rd(a); v |= (1<<bit); wr(a, v&0xff); return 4; };
+      T[opClr] = function () { const a=this.dp(this.fetch8()); let v=rd(a); v &= ~(1<<bit); wr(a, v&0xff); return 4; };
     }
 
     T[0x0E] = function () { const a=this.fetch16(); const v=rd(a); this.setNZ8((this.A - v) & 0x1ff); wr(a, v | this.A); return 6; };
     T[0x4E] = function () { const a=this.fetch16(); const v=rd(a); this.setNZ8((this.A - v) & 0x1ff); wr(a, v & (~this.A & 0xff)); return 6; };
 
+    T.subroutineMarker = true;
     this.opTable = T;
   }
 }
 
 if (typeof module !== 'undefined') module.exports = { SPC700 };
 
-
 // ============================================================================
-// 3. 高音質化 SNES DSP (S-DSP) エミュレータ
+// SNES DSP (S-DSP) エミュレータ
 // ============================================================================
 const SDSP_RATE = 32000;
+
 const COUNTER_RATES = [
   0, 2048, 1536, 1280, 1024, 768, 640, 512, 384, 320, 256, 192,
   160, 128, 96, 80, 64, 48, 40, 32, 24, 20, 16, 12, 10, 8, 6, 5, 4, 3, 2, 1
 ];
+
+function buildGaussTable() {
+  const table = new Float64Array(512);
+  for (let i = 0; i < 512; i++) {
+    const x = (i - 256) / 256;
+    table[i] = Math.exp(-3.0 * x * x);
+  }
+  return table;
+}
 
 class DSP {
   constructor(ram) {
@@ -628,31 +645,62 @@ class DSP {
     this.voices = [];
     for (let i = 0; i < 8; i++) {
       this.voices.push({
-        brrAddr: 0, brrOffset: 0, pitchCounter: 0,
-        history: [0, 0], decodedBlock: new Int16Array(16),
-        curBlockHeader: 0, keyOn: false, keyOff: false,
-        envMode: 'release', envLevel: 0, loopFlag: false,
-        endFlag: false, sampleAddr: 0, outSample: 0,
+        brrAddr: 0,
+        brrOffset: 0,
+        pitchCounter: 0,
+        history: [0, 0],
+        decodedBlock: new Int16Array(16),
+        curBlockHeader: 0,
+        keyOn: false,
+        keyOff: false,
+        envMode: 'off',
+        envLevel: 0,
+        loopFlag: false,
+        endFlag: false,
+        sampleAddr: 0,
+        outSample: 0,
+        konDelay: 0,
       });
     }
 
+    this.gaussTable = buildGaussTable();
+    this.echoBuffer = null;
     this.noiseLFSR = 0x4000;
+    this.masterVolL = 0;
+    this.masterVolR = 0;
   }
 
   reset() {
     this.regs.fill(0);
     this.regAddr = 0;
+    this._globalCounter = 0;
+    this._pendingKon = 0; // このサンプル期間中にKONへ書き込まれたビットの蓄積
     for (const v of this.voices) {
-      v.pitchCounter = 0; v.envLevel = 0; v.keyOn = false;
-      v.keyOff = false; v.envMode = 'release'; v.history = [0, 0];
-      v.brrOffset = 16; v.endFlag = false;
+      v.pitchCounter = 0;
+      v.envLevel = 0;
+      v.keyOn = false;
+      v.keyOff = false;
+      v.envMode = 'off';
+      v.history = [0, 0];
+      v.brrOffset = 16;
+      v.endFlag = false;
+      v._konLatched = false;
     }
   }
 
   read(addr) { return this.regs[addr & 0x7f]; }
   write(addr, val) {
-    addr &= 0x7f; val &= 0xff;
-    if (addr === 0x7c) return;
+    addr &= 0x7f;
+    val &= 0xff;
+    if (addr === 0x7c) {
+      this.regs[0x7c] = 0; // ENDXへの書き込みは値を問わず全ビットクリア
+      return;
+    }
+    if (addr === 0x4c) {
+      // KONへの書き込みは「新たに1になったビット」を確実に拾うため、
+      // 次のサンプル生成までのビットを蓄積しておく(見逃し防止)。
+      this._pendingKon = (this._pendingKon || 0) | val;
+    }
     this.regs[addr] = val;
   }
 
@@ -668,11 +716,16 @@ class DSP {
 
   get kon() { return this.regs[0x4c]; }
   get koff() { return this.regs[0x5c]; }
+  get flg() { return this.regs[0x6c]; }
   get pmon() { return this.regs[0x2d]; }
   get non() { return this.regs[0x3d]; }
+  get eon() { return this.regs[0x4d]; }
   get dir() { return this.regs[0x5d]; }
   get mvolL() { return this._s8(this.regs[0x0c]); }
   get mvolR() { return this._s8(this.regs[0x1c]); }
+  get evolL() { return this._s8(this.regs[0x2c]); }
+  get evolR() { return this._s8(this.regs[0x3c]); }
+  get efb() { return this._s8(this.regs[0x0d]); }
 
   getSampleDirEntry(srcn) {
     const base = (this.dir << 8) + srcn * 4;
@@ -681,7 +734,7 @@ class DSP {
     return { start, loop };
   }
 
-  decodeBrrBlock(voice, addr) {
+  decodeBrrBlock(voice, addr, voiceIdx) {
     const header = this.ram[addr];
     const range = (header >> 4) & 0x0f;
     const filter = (header >> 2) & 0x03;
@@ -698,7 +751,12 @@ class DSP {
       let nibble = (i & 1) === 0 ? (byte >> 4) : (byte & 0x0f);
       if (nibble >= 8) nibble -= 16;
 
-      let sample = (range <= 12) ? ((nibble << range) >> 1) : (nibble < 0 ? -2048 : 0);
+      let sample;
+      if (range <= 12) {
+        sample = (nibble << range) >> 1;
+      } else {
+        sample = nibble < 0 ? -2048 : 0;
+      }
 
       let pred = 0;
       switch (filter) {
@@ -712,13 +770,17 @@ class DSP {
       if (s < -32768) s = -32768;
 
       out[i] = s;
-      h2 = h1; h1 = s;
+      h2 = h1;
+      h1 = s;
     }
 
     voice.history[0] = h1;
     voice.history[1] = h2;
     voice.loopFlag = loopBit === 1;
     voice.endFlag = endBit === 1;
+    if (endBit === 1 && voiceIdx !== undefined) {
+      this.regs[0x7c] |= (1 << voiceIdx); // 波形終了時にENDXビットを立てる
+    }
     return endBit === 1;
   }
 
@@ -737,11 +799,16 @@ class DSP {
     const a2 = this.adsr2(vIdx);
     const useADSR = (a1 & 0x80) !== 0;
 
-    if (voice.keyOff) voice.envMode = 'release';
+    if (voice.keyOff) {
+      voice.envMode = 'release';
+    }
 
     if (voice.envMode === 'release') {
       voice.envLevel -= 8;
-      if (voice.envLevel < 0) voice.envLevel = 0;
+      if (voice.envLevel <= 0) {
+        voice.envLevel = 0;
+        voice.envMode = 'off';
+      }
       return voice.envLevel;
     }
 
@@ -752,18 +819,24 @@ class DSP {
       const sustainLvl = (((a2 >> 5) & 0x07) + 1) * 256;
 
       if (voice.envMode === 'attack') {
-        if (this._rateFires(attackRate)) {
-          voice.envLevel += (attackRate === 31) ? 1024 : 32;
-          if (voice.envLevel >= 2047) { voice.envLevel = 2047; voice.envMode = 'decay'; }
+        const rate = attackRate;
+        if (this._rateFires(rate)) {
+          voice.envLevel += (rate === 31) ? 1024 : 32;
+          if (voice.envLevel >= 2047) {
+            voice.envLevel = 2047;
+            voice.envMode = 'decay';
+          }
         }
       } else if (voice.envMode === 'decay') {
         if (this._rateFires(decayRate)) {
           voice.envLevel -= (((voice.envLevel - 1) >> 8) + 1);
+          if (voice.envLevel < 0) voice.envLevel = 0;
           if (voice.envLevel <= sustainLvl) voice.envMode = 'sustain';
         }
       } else if (voice.envMode === 'sustain') {
         if (sustainRate > 0 && this._rateFires(sustainRate)) {
           voice.envLevel -= (((voice.envLevel - 1) >> 8) + 1);
+          if (voice.envLevel < 0) voice.envLevel = 0;
         }
       }
     } else {
@@ -774,10 +847,17 @@ class DSP {
         const mode = (gainVal >> 5) & 0x03;
         const rate = gainVal & 0x1f;
         if (this._rateFires(rate)) {
-          if (mode === 0) voice.envLevel -= 32;
-          else if (mode === 1) voice.envLevel += 32;
-          else if (mode === 2) voice.envLevel -= (((voice.envLevel - 1) >> 8) + 1);
-          else voice.envLevel += (voice.envLevel < 1536) ? 32 : 8;
+          if (mode === 0) {
+            voice.envLevel -= 32;
+          } else if (mode === 1) {
+            voice.envLevel += 32;
+          } else if (mode === 2) {
+            voice.envLevel -= (((voice.envLevel - 1) >> 8) + 1);
+          } else {
+            voice.envLevel += (voice.envLevel < 1536) ? 32 : 8;
+          }
+          if (voice.envLevel < 0) voice.envLevel = 0;
+          if (voice.envLevel > 2047) voice.envLevel = 2047;
         }
       }
     }
@@ -798,8 +878,12 @@ class DSP {
     this._globalCounter = (this._globalCounter || 0) + 1;
 
     let mixL = 0, mixR = 0;
-    const konReg = this.kon;
+    // 通常のKONレジスタ値に加えて、この期間中に書き込まれたビットも
+    // 必ず拾う(CPUが同一サンプル期間内にKONへ複数回書き込んでも
+    // トリガーを取りこぼさないようにするため)。
+    const konReg = this.kon | (this._pendingKon || 0);
     const koffReg = this.koff;
+    this._pendingKon = 0;
 
     for (let i = 0; i < 8; i++) {
       const voice = this.voices[i];
@@ -813,9 +897,30 @@ class DSP {
       } else {
         voice._konLatched = false;
       }
-      
-      voice.keyOff = !!(koffReg & bit);
-      if (voice.envMode === 'off') continue;
+      if (koffReg & bit) {
+        voice.keyOff = true;
+      } else {
+        voice.keyOff = false;
+      }
+
+      if (voice.envMode === 'off') {
+        continue;
+      }
+
+      if (voice.envMode === 'kon-delay') {
+        // KON検出直後の無音準備期間。ボイスは出力を持たないが、
+        // 実機同様に最初のBRRブロックのデコードだけ先行して行っておく。
+        if (voice.brrOffset >= 16) {
+          this.decodeBrrBlock(voice, voice.brrAddr, i);
+          voice.brrOffset = 0;
+        }
+        voice.outSample = 0;
+        voice.konDelay--;
+        if (voice.konDelay <= 0) {
+          voice.envMode = 'attack';
+        }
+        continue;
+      }
 
       let p = this.pitch(i);
       if (i > 0 && (this.pmon & bit)) {
@@ -827,32 +932,31 @@ class DSP {
       if (voice.brrOffset >= 16) {
         if (voice.endFlag) {
           if (voice.loopFlag) {
-            voice.brrAddr = this.getSampleDirEntry(this.srcn(i)).loop;
+            const dirEntry = this.getSampleDirEntry(this.srcn(i));
+            voice.brrAddr = dirEntry.loop;
           } else {
-            voice.envMode = 'off'; voice.envLevel = 0; continue;
+            voice.envMode = 'off';
+            voice.envLevel = 0;
+            continue;
           }
         }
-        this.decodeBrrBlock(voice, voice.brrAddr);
+        this.decodeBrrBlock(voice, voice.brrAddr, i);
         voice.brrOffset = 0;
       }
 
-      // ----------------------------------------------------------------------
-      // 高音質改修：2点線形補間から4点キュービック (Hermite) 補間へ向上
-      // ----------------------------------------------------------------------
       const idx = voice.brrOffset;
-      const block = voice.decodedBlock;
-      const p0 = idx > 0 ? block[idx - 1] : block[idx];
-      const p1 = block[idx];
-      const p2 = idx < 15 ? block[idx + 1] : p1;
-      const p3 = idx < 14 ? block[idx + 2] : p2;
-
+      const s0 = voice.decodedBlock[idx];
+      const s1 = idx < 15 ? voice.decodedBlock[idx + 1] : s0;
       const frac = (voice.pitchCounter & 0xfff) / 0x1000;
-      let sample = cubicInterpolate(p0, p1, p2, p3, frac);
+      let sample = s0 + (s1 - s0) * frac;
 
-      if (this.non & bit) sample = this.stepNoise();
+      if (this.non & bit) {
+        sample = this.stepNoise();
+      }
 
       const env = this.stepEnvelope(voice, i);
       sample = (sample * env) / 2047;
+
       voice.outSample = sample;
 
       const vl = this.volL(i) / 128;
@@ -864,48 +968,59 @@ class DSP {
       const advance = voice.pitchCounter >> 12;
       voice.pitchCounter &= 0xfff;
       voice.brrOffset += advance;
-
       while (voice.brrOffset >= 16) {
         if (voice.endFlag) {
           if (voice.loopFlag) {
-            voice.brrAddr = this.getSampleDirEntry(this.srcn(i)).loop;
+            const dirEntry = this.getSampleDirEntry(this.srcn(i));
+            voice.brrAddr = dirEntry.loop;
           } else {
-            voice.envMode = 'off'; voice.envLevel = 0; voice.brrOffset = 16; break;
+            voice.envMode = 'off';
+            voice.envLevel = 0;
+            voice.brrOffset = 16;
+            break;
           }
         } else {
           voice.brrAddr = (voice.brrAddr + 9) & 0xffff;
         }
         if (voice.envMode === 'off') break;
-        this.decodeBrrBlock(voice, voice.brrAddr);
+        this.decodeBrrBlock(voice, voice.brrAddr, i);
         voice.brrOffset -= 16;
       }
     }
-
+//this.regs[0x4c] = 0;
     let outL = (mixL * this.mvolL) / (128 * 8192);
     let outR = (mixR * this.mvolR) / (128 * 8192);
+
+    outL = Math.tanh(outL);
+    outR = Math.tanh(outR);
 
     return [outL, outR];
   }
 
   _triggerKeyOn(voice, i) {
+    this.regs[0x7c] &= ~(1 << i); // KEY ON時にENDXビットをクリア
     const dirEntry = this.getSampleDirEntry(this.srcn(i));
     voice.brrAddr = dirEntry.start;
     voice.brrOffset = 16;
     voice.pitchCounter = 0;
     voice.history = [0, 0];
     voice.envLevel = 0;
-    voice.envMode = 'attack';
+    // 実機のS-DSPはKEY ON検出後、実際に音を出し始めるまで
+    // 数サンプル分の準備期間(BRRプリフェッチ・フィルタ履歴初期化)がある。
+    // この間 envMode は 'kon-delay' として無音を維持する。
+    voice.envMode = 'kon-delay';
+    voice.konDelay = 5;
     voice.keyOff = false;
     voice.endFlag = false;
     voice.loopFlag = false;
+    voice.outSample = 0;
   }
 }
 
 if (typeof module !== 'undefined') module.exports = { DSP, SDSP_RATE };
 
-
 // ============================================================================
-// 4. SPC再生エンジン
+// SPC再生エンジン
 // ============================================================================
 const CPU_CYCLES_PER_SAMPLE = 32;
 
@@ -920,14 +1035,18 @@ class SPCEngine {
 
   loadSPC(parsed) {
     this.cpu.ram.set(parsed.ram);
-    this.cpu.A = parsed.a; this.cpu.X = parsed.x; this.cpu.Y = parsed.y;
-    this.cpu.SP = parsed.sp; this.cpu.PC = parsed.pc;
+    this.cpu.A = parsed.a;
+    this.cpu.X = parsed.x;
+    this.cpu.Y = parsed.y;
+    this.cpu.SP = parsed.sp;
+    this.cpu.PC = parsed.pc;
     this.cpu.setPSW(parsed.psw);
 
     this.dsp.reset();
     this.dsp.regs.set(parsed.dspRegs);
 
-    for (const addr of [0xfa, 0xfb, 0xfc, 0xf1]) {
+    const ioRegs = [0xfa, 0xfb, 0xfc, 0xf1];
+    for (const addr of ioRegs) {
       this.cpu.write(addr, parsed.ram[addr]);
     }
     for (let i = 0; i < 4; i++) {
@@ -944,20 +1063,30 @@ class SPCEngine {
 
   renderSample() {
     if (!this.loaded) return [0, 0];
+
     let budget = CPU_CYCLES_PER_SAMPLE + this._cycleAccum;
     let guard = 0;
     while (budget > 0 && guard < 64) {
-      budget -= this.cpu.step();
+      const used = this.cpu.step();
+      budget -= used;
       guard++;
     }
     this._cycleAccum = budget;
+
     return this.dsp.generateSample();
+  }
+
+  renderBlock(outL, outR, numSamples) {
+    for (let i = 0; i < numSamples; i++) {
+      const [l, r] = this.renderSample();
+      outL[i] = l;
+      outR[i] = r;
+    }
   }
 }
 
-
 // ============================================================================
-// 5. SPCPlayer: ウルトラハイファイ オーディオ プレイヤー クラス
+// SPCPlayer: メインスレッド対応 Player クラス (ScriptProcessorNode 使用)
 // ============================================================================
 const SDSP_SAMPLE_RATE = 32000;
 
@@ -969,16 +1098,13 @@ class SPCPlayer {
 
     this.resampleRatio = SDSP_SAMPLE_RATE / this.audioCtx.sampleRate;
     this.srcPos = 0;
+    this.prevL = 0;
+    this.prevR = 0;
+    this.nextL = 0;
+    this.nextR = 0;
     this.haveSample = false;
 
-    // 高音質DSPリサンプリング用履歴バッファ (4点キュービック用)
-    this.histL = [0, 0, 0, 0];
-    this.histR = [0, 0, 0, 0];
-
-    // マスタリングエフェクトの構築
-    this.exciter = new HighFreqExciter(this.audioCtx.sampleRate);
-this.expander = new StereoExpander(this.audioCtx.sampleRate);
-
+    // ボイス情報更新時のコールバック関数
     this.onVoiceInfo = null;
 
     // ScriptProcessorNode の生成 (4096バッファサイズ)
@@ -991,8 +1117,7 @@ this.expander = new StereoExpander(this.audioCtx.sampleRate);
     this.playing = true;
     this.srcPos = 0;
     this.haveSample = false;
-    this.histL.fill(0);
-    this.histR.fill(0);
+    this.prevL = this.prevR = this.nextL = this.nextR = 0;
   }
 
   play() {
@@ -1009,11 +1134,11 @@ this.expander = new StereoExpander(this.audioCtx.sampleRate);
   }
 
   _advanceDspSample() {
-    this.histL.shift();
-    this.histR.shift();
+    this.prevL = this.nextL;
+    this.prevR = this.nextR;
     const [l, r] = this.engine.renderSample();
-    this.histL.push(l);
-    this.histR.push(r);
+    this.nextL = l;
+    this.nextR = r;
   }
 
   _getVoiceInfo() {
@@ -1040,11 +1165,14 @@ this.expander = new StereoExpander(this.audioCtx.sampleRate);
     const n = left.length;
 
     if (!this.playing || !this.engine.loaded) {
-      left.fill(0); right.fill(0); return;
+      left.fill(0);
+      right.fill(0);
+      return;
     }
 
     if (!this.haveSample) {
-      for (let k = 0; k < 4; k++) this._advanceDspSample();
+      this._advanceDspSample();
+      this._advanceDspSample();
       this.haveSample = true;
     }
 
@@ -1055,20 +1183,8 @@ this.expander = new StereoExpander(this.audioCtx.sampleRate);
       }
 
       const frac = this.srcPos;
-     
-      // _process 内の 1. リサンプリング部分を以下に差し替え
-let sampleL = cubicInterpolate(this.histL[0], this.histL[1], this.histL[2], this.histL[3], frac);
-let sampleR = cubicInterpolate(this.histR[0], this.histR[1], this.histR[2], this.histR[3], frac);
-      // 2. 超高域エキサイターによる倍音添加 (高域の明瞭度向上)
-      [sampleL, sampleR] = this.exciter.process(sampleL, sampleR);
-
-      // 3. ステレオ効果の自然な拡張
-      [sampleL, sampleR] = this.expander.process(sampleL, sampleR);
-
-      // 4. 透明感のあるリミッター処理
-      left[i] = cleanSoftLimit(sampleL);
-      right[i] = cleanSoftLimit(sampleR);
-
+      left[i] = this.prevL + (this.nextL - this.prevL) * frac;
+      right[i] = this.prevR + (this.nextR - this.prevR) * frac;
       this.srcPos += this.resampleRatio;
     }
 
@@ -1082,14 +1198,14 @@ let sampleR = cubicInterpolate(this.histR[0], this.histR[1], this.histR[2], this
 // ユーティリティ
 // ----------------------------------------------------------------------------
 function pitchToNote(pitch) {
-  if (!pitch) return "-";
-  const freq = 32000 * pitch / 4096;
-  if (!isFinite(freq) || freq <= 0) return "-";
+    if (!pitch) return "-";
+    const freq = 32000 * pitch / 4096;
+    if (!isFinite(freq) || freq <= 0) return "-";
 
-  const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
-  const midi = Math.round(69 + 12 * Math.log2(freq / 440));
-  const octave = Math.floor(midi / 12) - 1;
-  const name = noteNames[((midi % 12) + 12) % 12];
+    const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    const midi = Math.round(69 + 12 * Math.log2(freq / 440));
+    const octave = Math.floor(midi / 12) - 1;
+    const name = noteNames[((midi % 12) + 12) % 12];
 
-  return `${name}${octave}`;
+    return `${name}${octave}`;
 }
