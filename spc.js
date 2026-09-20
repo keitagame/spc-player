@@ -627,7 +627,7 @@ const SDSP_RATE = 32000;
 //   元は常時ピーク付近(0.975)で歪んでいたため余裕を持たせる。
 const OUTPUT_HEADROOM = 2.2;
 // ローパスのカットオフ(Hz)。低いほどまろやか、高いほど明るい。
-const LP_CUTOFF_HZ = 800;
+const LP_CUTOFF_HZ = 6000;
 const LP_ALPHA = 1 - Math.exp(-2 * Math.PI * LP_CUTOFF_HZ / SDSP_RATE);
 
 // 穏やかなソフトクリップ。小さい音はほぼそのまま、大きい音だけ滑らかに丸める。
