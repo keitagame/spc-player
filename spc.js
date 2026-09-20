@@ -625,35 +625,44 @@ const SDSP_RATE = 32000;
 // ---- 出力の耳あたり調整用パラメータ ---------------------------------------
 // OUTPUT_HEADROOM: 1より大きいほど全体の音量が下がり、tanhで潰れにくくなる。
 //   元は常時ピーク付近(0.975)で歪んでいたため余裕を持たせる。
-// ---- 高音質化・脱SFC制約パラメータ ---------------------------------------
-const OUTPUT_HEADROOM = 1.8; // ダイナミックレンジとクリアな音圧の確保
+const OUTPUT_HEADROOM = 2.2;
+// ローパスのカットオフ(Hz)。低いほどまろやか、高いほど明るい。
+const LP_CUTOFF_HZ = 800;
+const LP_ALPHA = 1 - Math.exp(-2 * Math.PI * LP_CUTOFF_HZ / SDSP_RATE);
 
+// 穏やかなソフトクリップ。小さい音はほぼそのまま、大きい音だけ滑らかに丸める。
+// tanhより「膝」がゆるやかで、常用しても歪み感が出にくい。
 function softClip(x) {
-  const t = 0.8;
+  const t = 0.6;                       // ここまでは素通し
   const ax = Math.abs(x);
   if (ax <= t) return x;
-  const over = (ax - t) / (1 - t);
+  const over = (ax - t) / (1 - t);     // 0以上
   const y = t + (1 - t) * Math.tanh(over);
   return x < 0 ? -y : y;
 }
+
 
 const COUNTER_RATES = [
   0, 2048, 1536, 1280, 1024, 768, 640, 512, 384, 320, 256, 192,
   160, 128, 96, 80, 64, 48, 40, 32, 24, 20, 16, 12, 10, 8, 6, 5, 4, 3, 2, 1
 ];
 
-// 高精度 Catmull-Rom (3次スプライン) 補間表の生成
-// SFCのガウス補間による籠もりを排除し、解像度の高いクリアな音を生成します。
-function buildCubicTable() {
-  const table = new Float64Array(256 * 4);
+// ガウス補間表(4タップ・512エントリ・4タップ合計 ≒ 2048)
+// 実機S-DSPのガウス補間と同じ性質: 線形補間より高域が丸くなり、
+// ジャリつき(エイリアシング)が減って耳に優しい音になる。
+function buildGaussTable() {
+  const table = new Int32Array(512);
+  const sigma = 0.62;
+  const kernel = d => Math.exp(-(d * d) / (2 * sigma * sigma));
   for (let i = 0; i < 256; i++) {
-    const t = i / 256;
-    const t2 = t * t;
-    const t3 = t2 * t;
-    table[i * 4 + 0] = -0.5 * t3 + 1.0 * t2 - 0.5 * t;
-    table[i * 4 + 1] =  1.5 * t3 - 2.5 * t2 + 1.0;
-    table[i * 4 + 2] = -1.5 * t3 + 2.0 * t2 + 0.5 * t;
-    table[i * 4 + 3] =  0.5 * t3 - 0.5 * t2;
+    const f = i / 256;
+    const w = [kernel(1 + f), kernel(f), kernel(1 - f), kernel(2 - f)]; // 古→新
+    const sum = w[0] + w[1] + w[2] + w[3];
+    const n = w.map(v => (v / sum) * 2048);
+    table[255 - i] = Math.round(n[0]);
+    table[511 - i] = Math.round(n[1]);
+    table[256 + i] = Math.round(n[2]);
+    table[i]       = Math.round(n[3]);
   }
   return table;
 }
@@ -687,21 +696,25 @@ class DSP {
       });
     }
 
-    this.cubicTable = buildCubicTable();
+    this.gaussTable = buildGaussTable();
     this.noiseLFSR = 0x4000;
     this.masterVolL = 0;
     this.masterVolR = 0;
 
     // --- エコー(残響) ---
+    // 実機同様、エコーバッファはSPC RAM上(ESA/EDLで指定)に置く。
+    // 8タップFIRの履歴と書き込み位置を保持する。
     this.echoPos = 0;
     this.echoLen = 0;
     this.firHistL = new Float64Array(8);
     this.firHistR = new Float64Array(8);
     this.firPos = 0;
 
-    // --- 出力段 ---
+    // --- 出力段(耳に優しくするための後処理) ---
+    // DC除去(ハイパス ~ 8Hz)と、高域を穏やかに落とすローパス。
     this.dcPrevInL = 0; this.dcPrevOutL = 0;
     this.dcPrevInR = 0; this.dcPrevOutR = 0;
+    this.lpL = 0; this.lpR = 0;
   }
 
   reset() {
@@ -979,15 +992,14 @@ class DSP {
       // --- ガウス補間 -------------------------------------------------
       // 直近4サンプル(voice.interp: 古→新)と、ピッチカウンタ下位ビットから
       // 表を引いて補間する。線形補間より高域の折り返しが少なく、丸い音になる。
-      // --- 高精度Catmull-Rom補間 (クリアで抜けの良い音質) ---------------
-      const gi = ((voice.pitchCounter >> 4) & 0xff) * 4;
-      const ct = this.cubicTable;
+      const gi = (voice.pitchCounter >> 4) & 0xff; // 0..255
+      const gt = this.gaussTable;
       const ip = voice.interp;
       let sample =
-        ip[0] * ct[gi] +
-        ip[1] * ct[gi + 1] +
-        ip[2] * ct[gi + 2] +
-        ip[3] * ct[gi + 3];
+        (gt[255 - gi] * ip[0] +
+         gt[511 - gi] * ip[1] +
+         gt[256 + gi] * ip[2] +
+         gt[gi]       * ip[3]) / 2048;
 
       if (this.non & bit) {
         sample = this.stepNoise();
@@ -1094,21 +1106,23 @@ class DSP {
 
     // ---- 出力の後処理(耳に優しくする) ----------------------------------
     // 1) 穏やかなソフトクリップ: 歪ませずにピークだけ丸める
-    // ---- 出力の後処理 (高域制限を解除) --------------------------------
-    // 1) クリップ処理
     outL = softClip(outL);
     outR = softClip(outR);
 
-    // 2) DC除去 (低域オフセット・ポップノイズ防止用ハイパス)
+    // 2) DC除去(ハイパス ~8Hz): 低域のボコボコしたオフセットやポップ音を防ぐ
     {
-      const R_DC = 0.99843;
+      const R_DC = 0.99843; // 1 - 2π*8/32000
       const yl = outL - this.dcPrevInL + R_DC * this.dcPrevOutL;
       this.dcPrevInL = outL; this.dcPrevOutL = yl; outL = yl;
       const yr = outR - this.dcPrevInR + R_DC * this.dcPrevOutR;
       this.dcPrevInR = outR; this.dcPrevOutR = yr; outR = yr;
     }
 
-    // (※ 帯域を殺していた7.5kHzローパスフィルターは完全撤去)
+    // 3) 1極ローパス(約 7.5kHz): シャリシャリ/キンキンした高域を穏やかに落とす
+    {
+      this.lpL += LP_ALPHA * (outL - this.lpL); outL = this.lpL;
+      this.lpR += LP_ALPHA * (outR - this.lpR); outR = this.lpR;
+    }
 
     return [outL, outR];
   }
@@ -1200,12 +1214,16 @@ class SPCEngine {
     }
   }
 }
+
 // ============================================================================
-// SPCPlayer: HDマスタリング・チェーン搭載版
+// SPCPlayer: メインスレッド対応 Player クラス (ScriptProcessorNode 使用)
 // ============================================================================
 const SDSP_SAMPLE_RATE = 32000;
 
 class SPCPlayer {
+  // audioCtx : 既存のAudioContext(省略時は内部で作成)
+  // destination : 出力先ノード(省略時は audioCtx.destination)。
+  //   index.html の gainNode を渡すと、音量スライダーが効くようになる。
   constructor(audioCtx, destination) {
     this.audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
     this.destination = destination || this.audioCtx.destination;
@@ -1215,68 +1233,40 @@ class SPCPlayer {
     this.resampleRatio = SDSP_SAMPLE_RATE / this.audioCtx.sampleRate;
     this.srcPos = 0;
 
+    // 3次補間(Catmull-Rom)用に、DSP出力の直近4サンプル(古→新)を保持
     this.hL = new Float64Array(4);
     this.hR = new Float64Array(4);
     this.haveSample = false;
 
-    this.fade = 0;
-    this.fadeTarget = 0;
-    this.fadeStep = 1 / (this.audioCtx.sampleRate * 0.05);
+    // 再生開始/停止時のフェード(プチッというクリック音の防止)
+    this.fade = 0;             // 現在のフェードゲイン 0..1
+    this.fadeTarget = 0;       // 目標
+    this.fadeStep = 1 / (this.audioCtx.sampleRate * 0.05); // 約50msでフェード
 
+    // ボイス情報コールバック。オーディオ処理の外(描画タイミング)で呼ぶ。
     this.onVoiceInfo = null;
     this._voiceTimer = null;
 
-    // 1. 音源出力ノード
+    // ScriptProcessorNode (8192: 少し大きめにして、処理落ちによるプチプチを防ぐ)
     this.scriptNode = this.audioCtx.createScriptProcessor(8192, 0, 2);
     this.scriptNode.onaudioprocess = (e) => this._process(e);
     this._connected = false;
-
-    // ------------------------------------------------------------------------
-    // 位相を崩さないストレート高音質化チェーン（反響感・濁りを完全排除）
-    // ------------------------------------------------------------------------
-    const ctx = this.audioCtx;
-
-    // A) 低域補正（音が太くくっきり聞こえるように少しだけ持ち上げる）
-    this.eqLow = ctx.createBiquadFilter();
-    this.eqLow.type = 'lowshelf';
-    this.eqLow.frequency.value = 100;
-    this.eqLow.gain.value = 2.0; // +2dB
-
-    // B) 高域補正（音の輪郭をクリアにして抜けを良くする）
-    this.eqHigh = ctx.createBiquadFilter();
-    this.eqHigh.type = 'highshelf';
-    this.eqHigh.frequency.value = 8000;
-    this.eqHigh.gain.value = 3.0; // +3dB
-
-    // C) コンプレッサー（アタック感を残しつつ音圧を整える）
-    this.compressor = ctx.createDynamicsCompressor();
-    this.compressor.threshold.value = -12;
-    this.compressor.knee.value = 10;
-    this.compressor.ratio.value = 2.0;
-    this.compressor.attack.value = 0.005;
-    this.compressor.release.value = 0.05;
-
-    // ---- ノードの直列接続（位相の歪みが起きないシンプルな接続）----
-    // ScriptProcessor -> EQ(Low) -> EQ(High) -> Compressor -> Destination
-    this.scriptNode.connect(this.eqLow);
-    this.eqLow.connect(this.eqHigh);
-    this.eqHigh.connect(this.compressor);
-    this.masterOutput = this.compressor; // 最終出力
   }
-load(parsed) {
+
+  load(parsed) {
     this.engine.loadSPC(parsed);
     this.srcPos = 0;
     this.haveSample = false;
     this.hL.fill(0); this.hR.fill(0);
     this.fade = 0;
   }
+
   play() {
     if (this.audioCtx.state === 'suspended') {
       this.audioCtx.resume();
     }
     if (!this._connected) {
-      // マスタリングチェーンを通した最終ノードを出力先に接続
-      this.masterOutput.connect(this.destination);
+      this.scriptNode.connect(this.destination);
       this._connected = true;
     }
     this.playing = true;
@@ -1285,19 +1275,21 @@ load(parsed) {
   }
 
   stop() {
+    // すぐ切らずにフェードアウトしてから停止する
     this.fadeTarget = 0;
     this._stopVoiceTimer();
     setTimeout(() => {
       if (this.fadeTarget === 0) {
         this.playing = false;
         if (this._connected) {
-          try { this.masterOutput.disconnect(); } catch (e) {}
+          try { this.scriptNode.disconnect(); } catch (e) {}
           this._connected = false;
         }
       }
     }, 80);
   }
 
+  // ボイス情報は ~30fps でメインスレッド側から取得(オーディオコールバック内では呼ばない)
   _startVoiceTimer() {
     if (this._voiceTimer) return;
     this._voiceTimer = setInterval(() => {
@@ -1306,7 +1298,6 @@ load(parsed) {
       }
     }, 33);
   }
-
   _stopVoiceTimer() {
     if (this._voiceTimer) { clearInterval(this._voiceTimer); this._voiceTimer = null; }
   }
@@ -1336,6 +1327,7 @@ load(parsed) {
     return voices;
   }
 
+  // Catmull-Rom 3次補間: y0,y1,y2,y3 のうち y1-y2 の間を t(0..1) で補間
   static _cubic(y0, y1, y2, y3, t) {
     const a = -0.5 * y0 + 1.5 * y1 - 1.5 * y2 + 0.5 * y3;
     const b =        y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
@@ -1371,11 +1363,14 @@ load(parsed) {
         this.srcPos -= 1;
       }
       const t = this.srcPos;
+      // hL[1]-hL[2] の間を補間(hL[0],hL[3] は両隣)
       let l = SPCPlayer._cubic(hL[0], hL[1], hL[2], hL[3], t);
       let r = SPCPlayer._cubic(hR[0], hR[1], hR[2], hR[3], t);
 
+      // フェード(イン/アウト)
       if (fade < fadeTarget) { fade = Math.min(fadeTarget, fade + fadeStep); }
       else if (fade > fadeTarget) { fade = Math.max(fadeTarget, fade - fadeStep); }
+      // 滑らかな曲線(コサイン)でゲインを掛ける
       const g = 0.5 - 0.5 * Math.cos(Math.PI * fade);
       left[i] = l * g;
       right[i] = r * g;
@@ -1385,7 +1380,6 @@ load(parsed) {
     this.fade = fade;
   }
 }
-
 
 // ----------------------------------------------------------------------------
 // ユーティリティ
