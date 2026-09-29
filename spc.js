@@ -1059,16 +1059,14 @@ class DSP {
   }
 
   generateSample() {
-    // カウンタは毎サンプル1減算(0 の次は 0x77FF)
     this._globalCounter = (this._globalCounter === 0) ? 0x77ff : this._globalCounter - 1;
     this.clockNoise();
 
     let mixL = 0, mixR = 0;
     let eMixL = 0, eMixR = 0; // EONが立っているボイスだけをエコーへ送る
-    // 通常のKONレジスタ値に加えて、この期間中に書き込まれたビットも
-    // 必ず拾う(CPUが同一サンプル期間内にKONへ複数回書き込んでも
-    // トリガーを取りこぼさないようにするため)。
-    const konReg = this.kon | (this._pendingKon || 0);
+
+    const pendingKon = this._pendingKon || 0;
+    const konReg = this.kon;
     const koffReg = this.koff;
     const resetFlag = (this.flg & 0x80) !== 0;   // FLG bit7: ソフトリセット
     this._pendingKon = 0;
@@ -1077,7 +1075,11 @@ class DSP {
       const voice = this.voices[i];
       const bit = 1 << i;
 
-      if (konReg & bit) {
+      // 新規のKON書き込み(pendingKon)があれば、既存のラッチ状態に関わらず強制再トリガー
+      if (pendingKon & bit) {
+        this._triggerKeyOn(voice, i);
+        voice._konLatched = true;
+      } else if (konReg & bit) {
         if (!voice._konLatched) {
           this._triggerKeyOn(voice, i);
           voice._konLatched = true;
@@ -1085,6 +1087,7 @@ class DSP {
       } else {
         voice._konLatched = false;
       }
+
       // KOFF、または FLG bit7(RESET) でリリースへ。RESET 中はエンベロープも即 0。
       voice.keyOff = ((koffReg & bit) !== 0) || resetFlag;
       if (resetFlag) {
