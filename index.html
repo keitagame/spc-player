@@ -342,12 +342,8 @@ function pitchToNote(pitch) {
     btnStop.addEventListener('click', () => {
       if (player) {
         player.stop();
-        player.seek(0);
-        playIcon.className = 'fa-solid fa-play text-xl ml-1';
-        timeStatus.textContent = 'STOPPED';
-        timeStatus.className = 'text-slate-500 uppercase';
-        timeCurrent.textContent = '00:00';
-        seekBar.value = 0;
+        
+        
       }
     });
 testPlay.addEventListener('click', () => {
