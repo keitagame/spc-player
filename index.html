@@ -1,519 +1,358 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ja">
 <head>
-<meta charset="UTF-8">
- <meta name="google-site-verification" content="ZZSxAUqnRnqPwPrbEKIs8b23T0Pga5JQ3vVt76KwMsc" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SPC</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>SPC Player</title>
 <style>
-  *{
-    color:white;
-    
-  }
-  img{
-image-rendering: pixelated; /* Chrome, Edge, Safari用 */
-  image-rendering: crisp-edges; /* Firefox用 */
+*{
+  color-scheme: dark;
 }
-  body{
-    background:black;
-  }
-/* ==========================================
-   各ボイス専用リアルタイム鍵盤UI用スタイル (追加部分)
-   ========================================== */
-.mini-keyboard {
-  display: inline-flex;
-  position: relative;
-  height: 36px;
-  background: #111;
-  padding: 2px 4px;
-  border-radius: 4px;
-  user-select: none;
-  vertical-align: middle;
+body{
+  background:black;
+}
+.hidden-input {
+  display: none;
 }
 
-.mini-key {
-  position: relative;
-  box-sizing: border-box;
-  border: 1px solid #333;
- 
+/* ラベルをボタンとして装飾する */
+.upload-label {
+  display: inline-block;
+  border:1px solid white;
+  color: white;
+  padding: 10px 20px;
+  border-radius: 0px;
+  cursor: pointer;
+  
 }
 
-.mini-key.white {
-  width: 8px;
-  height: 30px;
-  background: #eee;
-  z-index: 1;
+/* リスト全体の「・」を消して、横並び（Flexbox）にする */
+.nav-list {
+  list-style: none;    /* 点（・）を消す */
+  padding: 0;
+  margin: 0;
+  font-size:13px;
+  display: flex;       /* 子要素（li）を横並びにする */
+  gap: 20px;           /* メニューごとの間隔を20pxあける */
 }
 
-.mini-key.black {
-  width: 5px;
-  height: 18px;
-  background: #222;
-  margin-left: -2.5px;
-  margin-right: -2.5px;
-  z-index: 2;
-  border-color: #000;
+/* リンクの下線を消して色を変える（お好みで） */
+.nav-list a {
+  text-decoration: none;
+  color: #333;
 }
-
-/* ボイスごとの発光カラー (VOICE 0〜7) */
-.v-0 .mini-key.active { background: #ff5252 !important;  z-index: 2; }
-.v-1 .mini-key.active { background: #ff9800 !important;  z-index: 2; }
-.v-2 .mini-key.active { background: #ffd600 !important;  z-index: 2; }
-.v-3 .mini-key.active { background: #4caf50 !important;  z-index: 2; }
-.v-4 .mini-key.active { background: #00bcd4 !important;  z-index: 2; }
-.v-5 .mini-key.active { background: #2196f3 !important;  z-index: 2; }
-.v-6 .mini-key.active { background: #9c27b0 !important;  z-index: 2; }
-.v-7 .mini-key.active { background: #e91e63 !important;  z-index: 2; }</style>
+.button{
+  background:black;
+  font-size:13px;
+  display: inline-block;
+  border:1px solid white;
+  color: white;
+  padding: 10px 20px;
+  border-radius: 0px;
+  cursor: pointer;
+}
+#spcCanvas {
+      height:400px;
+  width:400px;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+      
+    }
+</style>
 </head>
 <body>
-
-<div class="card">
-  <img width="200" src="NANDSP.png">
- <br><br>
-  <div class="dropzone" id="dropzone">
-    <input type="file" id="fileInput" accept=".spc" />
-   
-  </div>
-
-  <div class="track-info" id="trackInfo">
-    <div class="track-title" id="trackTitle">-</div>
-    <div class="track-game" id="trackGame"></div>
-    <div class="track-meta">
-      <span id="trackArtist"></span>
-      <span id="trackDumper"></span>
-    </div>
-  </div>
- <div id="voiceInfo">
-    <table>
-        <!-- <th>PITCH</th> の下に <th>鍵盤</th> を追加 -->
-<thead>
-    <tr>
-        <th>VOICE</th>
-        <th>状態</th>
-        <th>音量 L</th>
-        <th>音量 R</th>
-        <th>音階</th>
-        <th>PITCH</th>
-        <th>鍵盤</th>
-    </tr>
-</thead>
-        <tbody id="voiceTable"></tbody>
-    </table>
-</div>
-<!-- 鍵盤UIコンテナ (追加部分) -->
-<div class="keyboard-container">
-  <div class="keyboard" id="keyboard"></div>
-</div>
- <canvas id="waveCanvas" width="600" height="120"></canvas>
-
-<div style="display:none">
-  <div class="controls">
-    <button class="play-btn" id="playBtn" disabled>▶ 再生</button>
-  </div>
-
-  <div class="volume-row">
-    <span>🔊</span>
-    <input type="range" id="volumeSlider" min="0" max="100" value="70" />
-    <span id="volumeLabel">70%</span>
-  </div>
-
-  <div class="status" id="status">SPCファイルを選択してください</div>
-
-  <div class="footer-note">
-    ※ SPC700 CPUとS-DSPを独自にJavaScriptで実装した簡易エミュレータです。
-    一部の特殊命令やエコー処理は近似実装のため、曲によっては音が実機と異なる場合があります。
-  </div>
-</div>
-</div>
-<script src="spc.js">
-
-</script>
-.spcプレイヤー | spc700エミュレーター | WebSPCPlayer<br>
-スーパーファミコンのramダンプである.spcをweb上で再生出来ます。<br>
-正しく再生されない場合があります。
+<header>
+  <nav>
+    <ul class="nav-list">
+      
+      <li><label class="upload-label">SPCを選択<input type="file" id="fileinput" class="hidden-input"></label></li>
+      <li><button class="button" id="play" type="button">再生</button></li>
+      <li><button class="button" id="stop" type="button">停止</button></li>
+      <li><button class="button" type="button">DOWN.SPCを再生</button></li>
+    </ul>
+  </nav>
+</header><br><script src="libspc.js"></script>
+<canvas id="spcCanvas" width="256" height="256" class="w-full h-full object-contain block"></canvas>
+<br>
+<b>spc player online</b><br>
+このサイトはweb上でsfcのARAMのダンプである.spcを再生できるspcプレイヤーです。<br>
+正しく再生されなかったりする場合があります。<br>
+down.spcは私がテスト用に作ったファイルです。
 <script>
-  // ============================================================================
-// SPCファイルパーサー
-// .spc フォーマット (v0.30, ヘッダ256byte + RAM 64KB + DSPレジスタ128byte + ...)
-// 参考: SPC700 File Format specification
-// ============================================================================
 
-function parseSPC(arrayBuffer) {
-  const buf = new Uint8Array(arrayBuffer);
-  const dv = new DataView(arrayBuffer);
-
-  // ヘッダチェック "SNES-SPC700 Sound File Data"
-  const headerText = String.fromCharCode(...buf.slice(0, 33));
-  if (!headerText.startsWith('SNES-SPC700')) {
-    throw new Error('SPCファイルのヘッダが不正です（SNES-SPC700シグネチャが見つかりません）');
-  }
-
-  const hasID666 = buf[0x23] === 26 || buf[0x23] === 27; // 0x1A(26)=タグあり, 0x1B(27)=タグなし版もある実装差異に対応
-  // 実際の仕様: offset 0x23 が 0x1A固定でヘッダ終端マーカー、0x24がID666タグの有無(1=あり,0=なし)
-  const id666Flag = buf[0x24];
-
-  // レジスタ情報 (offset 0x25-0x2D)
-  const pc = dv.getUint16(0x25, true);
-  const a = buf[0x27];
-  const x = buf[0x28];
-  const y = buf[0x29];
-  const psw = buf[0x2a];
-  const sp = buf[0x2b];
-
-  // ID666タグ (offset 0x2E - 0xD0) 曲情報
-  let songTitle = '', gameTitle = '', dumperName = '', comments = '', dateDumped = '';
-  let artist = '';
-  try {
-    songTitle = readTagString(buf, 0x2e, 32);
-    gameTitle = readTagString(buf, 0x4e, 32);
-    dumperName = readTagString(buf, 0x6e, 16);
-    comments = readTagString(buf, 0x7e, 32);
-    artist = readTagString(buf, 0xb1, 32);
-  } catch (e) {
-    // タグが壊れていても再生自体は継続する
-  }
-
-  // RAMデータ: offset 0x100 から 65536 byte
-  const ramStart = 0x100;
-  const ram = buf.slice(ramStart, ramStart + 0x10000);
-
-  // DSPレジスタ: offset 0x10100 から 128 byte
-  const dspStart = 0x10100;
-  const dspRegs = buf.slice(dspStart, dspStart + 0x80);
-
-  return {
-    pc, a, x, y, psw, sp,
-    ram,
-    dspRegs,
-    tags: { songTitle, gameTitle, artist, dumperName, comments },
-  };
-}
-
-function readTagString(buf, offset, length) {
-  let end = offset;
-  const max = offset + length;
-  while (end < max && buf[end] !== 0) end++;
-  const bytes = buf.slice(offset, end);
-  // Shift-JISの可能性もあるが、まずUTF-8/ASCIIとしてデコードを試みる
-  try {
-    return new TextDecoder('shift-jis', { fatal: false }).decode(bytes).trim();
-  } catch (e) {
-    return String.fromCharCode(...bytes).trim();
-  }
-}
-
-if (typeof module !== 'undefined') module.exports = { parseSPC };
-</script>
-<script>
-  // ============================================================================
-// メインスレッド制御スクリプト
-// ファイル選択/ドロップ -> SPCパース -> AudioWorkletへ転送 -> 再生制御
-// ============================================================================
-
-(() => {
-  
-  const dropzone = document.getElementById('dropzone');
-  const fileInput = document.getElementById('fileInput');
-  const playBtn = document.getElementById('playBtn');
-  const statusEl = document.getElementById('status');
-  const trackInfo = document.getElementById('trackInfo');
-  const trackTitle = document.getElementById('trackTitle');
-  const trackGame = document.getElementById('trackGame');
-  const trackArtist = document.getElementById('trackArtist');
-  const trackDumper = document.getElementById('trackDumper');
-  const volumeSlider = document.getElementById('volumeSlider');
-  const volumeLabel = document.getElementById('volumeLabel');
-const voiceTable = document.getElementById("voiceTable");
 function pitchToNote(pitch) {
-    if (!pitch) return "-";
-
-    // SPC700のピッチ値から周波数を概算
-    const freq = 32000 * pitch / 4096;
-
-    if (!isFinite(freq) || freq <= 0) {
-        return "-";
-    }
-
-    const noteNames = [
-        "C", "C#", "D", "D#", "E", "F",
-        "F#", "G", "G#", "A", "A#", "B"
-    ];
-
-    const midi = Math.round(
-        69 + 12 * Math.log2(freq / 440)
-    );
-
-    const octave = Math.floor(midi / 12) - 1;
-    const name = noteNames[((midi % 12) + 12) % 12];
-
-    return `${name}${octave}`;
-}
-// ============================================================================
-// 各ボイス用リアルタイム鍵盤制御 (追加・変更部分)
-// ============================================================================
-const MIN_MIDI_NOTE = 24;
-const MAX_MIDI_NOTE = 108;
-const isBlackKey = [false, true, false, true, false, false, true, false, true, false, true, false];
-// ピッチからMIDIノート番号を算出 (0x1000 = C4 / MIDI 60)
-function pitchToMidi(pitch) {
-  if (!pitch || pitch <= 0) return null;
-  return Math.round(60 + 12 * Math.log2(pitch / 4096));
-}
-
-// 音階名テキスト変換の修正
-function pitchToNote(pitch) {
-  const midi = pitchToMidi(pitch);
-  if (midi === null) return "-";
-
+  if (!pitch) return "-";
+  const freq = 32000 * pitch / 4096;
+  if (!isFinite(freq) || freq <= 0) return "-";
   const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+  const midi = Math.round(69 + 12 * Math.log2(freq / 440));
   const octave = Math.floor(midi / 12) - 1;
   const name = noteNames[((midi % 12) + 12) % 12];
   return `${name}${octave}`;
 }
+    // Global Application State
+    let player = null;
+    let audioCtx = null;
+    let animationFrameId = null;
 
-// 初期化：8ボイス分のテーブル行と鍵盤DOMをあらかじめ作成
-function initVoiceKeyboards() {
-  const voiceTable = document.getElementById("voiceTable");
-  if (!voiceTable) return;
-  voiceTable.innerHTML = "";
+    // DOM Elements
+    const canvas = document.getElementById('spcCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    const fileInput = document.getElementById('fileinput');
 
-  for (let v = 0; v < 8; v++) {
-    const tr = document.createElement("tr");
-    tr.id = `voice-row-${v}`;
+    const btnPlay = document.getElementById('play');
+    const btnStop = document.getElementById('stop');
+    
+    // Voice peak smooth buffer
+    const voicePeakHistory = Array.from({ length: 8 }, () => ({
+      volL: 0,
+      volR: 0,
+      env: 0,
+      pitch: 0
+    }));
 
-    // 各ボイス専用の鍵盤HTML
-    let kbHtml = `<div class="mini-keyboard v-${v}">`;
-    for (let note = MIN_MIDI_NOTE; note <= MAX_MIDI_NOTE; note++) {
-      const isBlack = isBlackKey[note % 12];
-      kbHtml += `<div class="mini-key ${isBlack ? 'black' : 'white'}" data-note="${note}"></div>`;
-    }
-    kbHtml += `</div>`;
+    function drawVisualizer() {
+      // Clear canvas with deep dark background
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, 256, 256);
 
-    tr.innerHTML = `
-      <td>${v}</td>
-      <td class="v-status">-</td>
-      <td class="v-vol-l">-</td>
-      <td class="v-vol-r">-</td>
-      <td class="v-note">-</td>
-      <td class="v-pitch">-</td>
-      <td>${kbHtml}</td>
-    `;
-    voiceTable.appendChild(tr);
-  }
-}
+      // Draw cyber background grid
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.00)';
+      ctx.lineWidth = 1;
+      for (let x = 0; x < 256; x += 16) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 256); ctx.stroke();
+      }
+      for (let y = 0; y < 256; y += 16) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(256, y); ctx.stroke();
+      }
 
-function updateVoiceInfo(voices) {
-  if (!voices || !Array.isArray(voices)) return;
+      // Fetch voice states from S-DSP engine
+      const voiceStates = player ? player.getVoiceStates() : null;
 
-  // spc.js 側が 1〜8 (1始まり) で送っているか判定
-  const isOneBased = voices.some(v => (v && (v.voice === 8 || v.ch === 8 || v.id === 8)));
+      // Render each voice (8 Voices, 32px height each -> total 256px)
+      for (let i = 0; i < 8; i++) {
+        const y0 = i * 32;
+        const hue = i * 45; // Rainbow Color Palette
+        const baseColor = `hsl(${hue}, 100%, 60%)`;
+        const dimColor = `hsl(${hue}, 60%, 25%)`;
 
-  voices.forEach((v, index) => {
-    if (!v) return;
+        const state = voiceStates ? voiceStates[i] : {
+          outSample: 0, envLevel: 0, volL: 0, volR: 0, pitch: 0
+        };
 
-    // ボイスIDの取得 (voice, ch, channel, id の順で検索)
-    let rawIdx = v.voice ?? v.ch ?? v.channel ?? v.id ?? index;
-    let vIdx = Number(rawIdx);
+        // Smooth decay physics for visualization
+        const hist = voicePeakHistory[i];
+        hist.volL = Math.max(Math.abs(state.volL), hist.volL * 0.82);
+        hist.volR = Math.max(Math.abs(state.volR), hist.volR * 0.82);
+        hist.env = Math.max(state.envLevel, hist.env * 0.85);
+        hist.pitch = Math.max(state.pitch, hist.pitch * 0.90);
 
-    // 1始まりの場合は 1 引いて 0〜7 に揃える
-    if (isOneBased && vIdx >= 1) {
-      vIdx -= 1;
-    }
+        // Voice row background separator
+        ctx.fillStyle = (i % 2 === 0) ? 'rgba(15, 22, 35, 0.6)' : 'rgba(10, 15, 25, 0.6)';
+        ctx.fillRect(0, y0, 256, 31);
 
-    const row = document.getElementById(`voice-row-${vIdx}`);
-    if (!row) return;
+        // Active voice glow indicator
+        const isActive = state.envLevel > 10;
+        ctx.fillStyle = isActive ? baseColor : 'rgba(255,255,255,0.1)';
+        ctx.fillRect(0, y0, 3, 31);
 
-    // 値の反映
-    const active = !!v.active;
-    const volL = v.volumeL ?? v.volL ?? v.vol_l ?? "-";
-    const volR = v.volumeR ?? v.volR ?? v.vol_r ?? "-";
-    const pitch = typeof v.pitch === "number" ? v.pitch : 0;
+        // 1. Voice Label & Musical Note
+        ctx.font = 'bold 9px "JetBrains Mono", monospace';
+        ctx.fillStyle = baseColor;
+        ctx.fillText(`V${i + 1}`, 6, y0 + 12);
 
-    row.querySelector(".v-status").textContent = active ? "ON" : "OFF";
-    row.querySelector(".v-vol-l").textContent = volL;
-    row.querySelector(".v-vol-r").textContent = volR;
-    row.querySelector(".v-note").textContent = active ? pitchToNote(pitch) : "-";
-    row.querySelector(".v-pitch").textContent = "0x" + pitch.toString(16).padStart(4, "0").toUpperCase();
+        const noteStr = pitchToNote(state.pitch);
+        ctx.fillStyle = isActive ? '#ffffff' : '#475569';
+        ctx.font = '9px "JetBrains Mono", monospace';
+        ctx.fillText(noteStr.padEnd(4, ' '), 22, y0 + 12);
 
-    // 鍵盤UIの更新
-    const kb = row.querySelector(".mini-keyboard");
-    if (kb) {
-      kb.querySelectorAll(".mini-key.active").forEach(k => k.classList.remove("active"));
+        // 2. Vol L Bar (-128 ~ 127)
+        ctx.fillStyle = '#64748b';
+        ctx.font = '7px sans-serif';
+        ctx.fillText('L', 48, y0 + 10);
 
-      if (active && pitch > 0) {
-        const midi = pitchToMidi(pitch);
-        if (midi !== null) {
-          const key = kb.querySelector(`.mini-key[data-note="${midi}"]`);
-          if (key) {
-            key.classList.add("active");
-          }
+        const normVolL = Math.min(1.0, hist.volL / 128);
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.fillRect(56, y0 + 3, 38, 8); // Track background
+        if (normVolL > 0) {
+          const barGrad = ctx.createLinearGradient(56, 0, 94, 0);
+          barGrad.addColorStop(0, dimColor);
+          barGrad.addColorStop(1, baseColor);
+          ctx.fillStyle = barGrad;
+          ctx.fillRect(56, y0 + 3, Math.floor(normVolL * 38), 8);
         }
-      }
-    }
-  });
-}
-// 初期化実行 (画面読み込み時に鍵盤列をあらかじめ生成)
-initVoiceKeyboards();
 
-  let audioContext = null;
-  let player = null;
-  let workletNode = null;
-  let gainNode = null;
-  let isPlaying = false;
-  let isLoaded = false;
-  let currentParsed = null;
+        // 3. Vol R Bar (-128 ~ 127)
+        ctx.fillStyle = '#64748b';
+        ctx.fillText('R', 48, y0 + 22);
 
-  function setStatus(msg, kind) {
-    statusEl.textContent = msg;
-    statusEl.className = 'status' + (kind ? ' ' + kind : '');
-  }
+        const normVolR = Math.min(1.0, hist.volR / 128);
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.fillRect(56, y0 + 15, 38, 8);
+        if (normVolR > 0) {
+          const barGrad = ctx.createLinearGradient(56, 0, 94, 0);
+          barGrad.addColorStop(0, dimColor);
+          barGrad.addColorStop(1, baseColor);
+          ctx.fillStyle = barGrad;
+          ctx.fillRect(56, y0 + 15, Math.floor(normVolR * 38), 8);
+        }
 
-  // --------------------------------------------------------------------
-  // AudioContext / AudioWorklet 初期化
-  // SDSPは32000Hz固定でサンプルを生成する仕様のため、AudioContextの
-  // サンプルレートも32000Hzで作成し、リサンプリングなしで直結する。
-  // --------------------------------------------------------------------
-  async function ensureAudioContext() {
-    if (audioContext) return;
+        // 4. Envelope Bar (0 ~ 2047)
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = '7px "JetBrains Mono", monospace';
+        ctx.fillText('ENV', 100, y0 + 10);
 
-// サンプルレートは指定せず、端末ネイティブのレートを使う。
-// (固定指定すると端末が別レートのとき、OS側で余計な再変換が入って音が荒れる)
-// SPCPlayer 側が 32kHz → ネイティブレート へ高品質補間して出力する。
-const audioOptions = {
-  latencyHint: 'playback' // 音切れしにくさ優先
-};
+        const normEnv = Math.min(1.0, hist.env / 2047);
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.fillRect(100, y0 + 13, 62, 11);
+        if (normEnv > 0) {
+          ctx.fillStyle = baseColor;
+          ctx.fillRect(100, y0 + 13, Math.floor(normEnv * 62), 11);
+        }
+        // Env value overlay
+        ctx.fillStyle = '#e2e8f0';
+        ctx.font = '7px "JetBrains Mono", monospace';
+        ctx.fillText(`${state.envLevel}`, 126, y0 + 21);
 
-const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-audioContext = new AudioContextClass(audioOptions);
+        // 5. Pitch Bar (0 ~ 16383)
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = '7px "JetBrains Mono", monospace';
+        ctx.fillText('PIT', 168, y0 + 10);
 
-    gainNode = audioContext.createGain();
-    gainNode.gain.value = Number(volumeSlider.value) / 100;
+        const normPitch = Math.min(1.0, hist.pitch / 16383);
+        ctx.fillStyle = 'rgba(255,255,255,0.08)';
+        ctx.fillRect(168, y0 + 13, 82, 11);
+        if (normPitch > 0) {
+          const pitchGrad = ctx.createLinearGradient(168, 0, 250, 0);
+          pitchGrad.addColorStop(0, `hsl(${hue}, 80%, 40%)`);
+          pitchGrad.addColorStop(1, `hsl(${hue}, 100%, 70%)`);
+          ctx.fillStyle = pitchGrad;
+          ctx.fillRect(168, y0 + 13, Math.floor(normPitch * 82), 11);
+        }
+        // Pitch value text overlay
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '7px "JetBrains Mono", monospace';
+        ctx.fillText(`${state.pitch}`, 205, y0 + 21);
 
-    gainNode.connect(audioContext.destination);
-
-    
-    
-  }
-
-  // --------------------------------------------------------------------
-  // ファイル処理
-  // --------------------------------------------------------------------
-  async function handleFile(file) {
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith('.spc')) {
-      setStatus('拡張子が .spc のファイルを選択してください', 'error');
-      return;
-    }
-
-    setStatus('ファイルを読み込み中...');
-    playBtn.disabled = true;
-    isLoaded = false;
-
-    try {
-      const buf = await file.arrayBuffer();
-      const parsed = parseSPC(buf);
-      currentParsed = parsed;
-
-      // UI更新: 曲情報表示
-      const tags = parsed.tags;
-      trackTitle.textContent = tags.songTitle || file.name;
-      trackGame.textContent = tags.gameTitle || '';
-      trackArtist.textContent = tags.artist ? ('作曲: ' + tags.artist) : '';
-      trackDumper.textContent = tags.dumperName ? ('Dump: ' + tags.dumperName) : '';
-      trackInfo.classList.add('visible');
-
-      setStatus('オーディオエンジンを初期化中...');
-      await ensureAudioContext();
-
-      if (audioContext.state === 'suspended') {
-        await audioContext.resume();
+        // Bottom separator line
+        ctx.fillStyle = 'rgba(255,255,255,0.05)';
+        ctx.fillRect(0, y0 + 31, 256, 1);
       }
 
+      // Update timer & progress
+      if (player && player.playing) {
+        
+        
+      }
 
-      // 前の曲が鳴っていたら、フェードアウトさせて止める(曲が重なって鳴るのを防ぐ)
+      animationFrameId = requestAnimationFrame(drawVisualizer);
+    }
+
+    function formatTime(seconds) {
+      const m = Math.floor(seconds / 60);
+      const s = Math.floor(seconds % 60);
+      return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+
+    function initAudioContext() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        player = new SPCPlayer(audioCtx);
+      }
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+    }
+
+    function handleFile(file) {
+      if (!file || !file.name.toLowerCase().endsWith('.spc')) {
+        showNotice('Invalid file format. Please select an .spc file.');
+        return;
+      }
+
+      initAudioContext();
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const meta = player.load(e.target.result);
+          
+          // Update Metadata UI
+          
+          // Enable controls
+          btnPlay.disabled = false;
+          btnStop.disabled = false;
+          
+
+          // Start auto playback
+          startPlayback();
+        } catch (err) {
+          console.error(err);
+          showNotice('SPCファイルの読み込みに失敗しました。');
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    }
+
+    function startPlayback() {
+      if (!player) return;
+      player.play();
+      
+    }
+
+    function pausePlayback() {
+      if (!player) return;
+      player.stop();
+      playIcon.className = 'fa-solid fa-play text-xl ml-1';
+      timeStatus.textContent = 'PAUSED';
+      timeStatus.className = 'text-amber-400 font-bold uppercase';
+    }
+
+    function showNotice(msg) {
+      const banner = document.createElement('div');
+      banner.className = 'fixed top-4 right-4 bg-red-600 text-white px-4 py-2 rounded-xl text-xs shadow-2xl font-mono z-50 animate-bounce';
+      banner.textContent = msg;
+      document.body.appendChild(banner);
+      setTimeout(() => banner.remove(), 3000);
+    }
+
+    // Event Listeners
+    btnPlay.addEventListener('click', () => {
+      initAudioContext();
+      if (player.playing) {
+        pausePlayback();
+      } else {
+        startPlayback();
+      }
+    });
+
+    btnStop.addEventListener('click', () => {
       if (player) {
         player.stop();
-        player = null;
+        player.seek(0);
+        playIcon.className = 'fa-solid fa-play text-xl ml-1';
+        timeStatus.textContent = 'STOPPED';
+        timeStatus.className = 'text-slate-500 uppercase';
+        timeCurrent.textContent = '00:00';
+        seekBar.value = 0;
       }
+    });
 
-      // AudioContext と gainNode を渡す:
-      //  - 48kHzのContextをそのまま使う(別Contextを作らない)
-      //  - 出力を gainNode 経由にして、音量スライダーが効くようにする
-      player = new SPCPlayer(audioContext, gainNode);
+    
+    
+    // File Input Drag & Drop
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files.length > 0) {
+        handleFile(e.target.files[0]);
+      }
+    });
 
-      // ボイス情報のコールバック(オーディオ処理の外で ~30fps で呼ばれる)
-      player.onVoiceInfo = (voices) => {
-        updateVoiceInfo(voices);
-      };
 
-      // SPCデータのロードと再生
-      player.load(currentParsed);
-      player.play();
-      isLoaded = true;
-      setStatus('再生中...', 'ok');
-    } catch (e) {
-      console.error(e);
-      setStatus('読み込みエラー: ' + e.message, 'error');
-    }
-  }
-
-  // --------------------------------------------------------------------
-  // 再生/停止トグル
-  // --------------------------------------------------------------------
-  async function togglePlay() {
-    if (!isLoaded || !workletNode) return;
-
-    if (audioContext.state === 'suspended') {
-      await audioContext.resume();
-    }
-
-    if (isPlaying) {
-      workletNode.port.postMessage({ type: 'stop' });
-      isPlaying = false;
-      playBtn.textContent = '▶ 再生';
-      playBtn.classList.remove('playing');
-      setStatus('停止しました');
-    } else {
-      workletNode.port.postMessage({ type: 'play' });
-      isPlaying = true;
-      playBtn.textContent = '⏸ 停止';
-      playBtn.classList.add('playing');
-      setStatus('再生中...', 'ok');
-    }
-  }
-
-  // --------------------------------------------------------------------
-  // イベントバインド
-  // --------------------------------------------------------------------
-  fileInput.addEventListener('change', (e) => {
-    const file = e.target.files && e.target.files[0];
-    handleFile(file);
-  });
-
-  dropzone.addEventListener('dragover', (e) => {
-    e.preventDefault();
-    dropzone.classList.add('dragover');
-  });
-  dropzone.addEventListener('dragleave', () => {
-    dropzone.classList.remove('dragover');
-  });
-  dropzone.addEventListener('drop', (e) => {
-    e.preventDefault();
-    dropzone.classList.remove('dragover');
-    const file = e.dataTransfer.files && e.dataTransfer.files[0];
-    handleFile(file);
-  });
-
-  playBtn.addEventListener('click', togglePlay);
-
-  volumeSlider.addEventListener('input', () => {
-    const v = Number(volumeSlider.value);
-    volumeLabel.textContent = v + '%';
-    if (gainNode) {
-      gainNode.gain.value = v / 100;
-    }
-  });
-})();
-</script>
+    // Start Rendering Loop on Window Load
+    window.onload = () => {
+      drawVisualizer();
+    };
+  </script>
 </body>
 </html>
