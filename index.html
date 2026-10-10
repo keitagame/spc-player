@@ -4,11 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>SPC Player</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DotGothic16&display=swap" rel="stylesheet">
 <style>
 *{
   color-scheme: dark;
 }
 body{
+  font-family: "DotGothic16", sans-serif;
+  font-weight: 400;
+  font-style: normal;
   background:black;
 }
 .hidden-input {
@@ -42,6 +48,8 @@ body{
   color: #333;
 }
 .button{
+   font-family: "DotGothic16", sans-serif;
+  font-weight: 400;
   background:black;
   font-size:13px;
   display: inline-block;
@@ -58,6 +66,10 @@ body{
       image-rendering: crisp-edges;
       
     }
+    .o{
+      font-size:20px;
+      margin:0;
+    }
 </style>
 </head>
 <body>
@@ -68,13 +80,13 @@ body{
       <li><label class="upload-label">SPCを選択<input type="file" id="fileinput" class="hidden-input"></label></li>
       <li><button class="button" id="play" type="button">再生</button></li>
       <li><button class="button" id="stop" type="button">停止</button></li>
-      <li><button class="button" type="button">DOWN.SPCを再生</button></li>
+      <li><button class="button" id="test" type="button">DOWN.SPCを再生</button></li>
     </ul>
   </nav>
 </header><br><script src="libspc.js"></script>
 <canvas id="spcCanvas" width="256" height="256" class="w-full h-full object-contain block"></canvas>
 <br>
-<b>spc player online</b><br>
+<div class="o">spc player online</div>
 このサイトはweb上でsfcのARAMのダンプである.spcを再生できるspcプレイヤーです。<br>
 正しく再生されなかったりする場合があります。<br>
 down.spcは私がテスト用に作ったファイルです。
@@ -100,7 +112,7 @@ function pitchToNote(pitch) {
     const ctx = canvas.getContext('2d');
     
     const fileInput = document.getElementById('fileinput');
-
+  const testPlay = document.getElementById('test');
     const btnPlay = document.getElementById('play');
     const btnStop = document.getElementById('stop');
     
@@ -338,7 +350,10 @@ function pitchToNote(pitch) {
         seekBar.value = 0;
       }
     });
-
+testPlay.addEventListener('click', () => {
+     initAudioContext();
+      player.loadUrl("down.spc");
+    });
     
     
     // File Input Drag & Drop
