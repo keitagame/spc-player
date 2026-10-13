@@ -287,7 +287,7 @@ function pitchToNote(pitch) {
     const NOTE = ['C', 'C+', 'D', 'D+', 'E', 'F', 'F+', 'G', 'G+', 'A', 'A+', 'B'];
     // SPCピッチ → 鍵盤番号(0-119)。本家は SPC_NOTE.DLL でサンプルの基音を推定するため近似
     function noteIndex(pitch) {
-      const f = 96 + 12 * Math.log2(Math.max(1, pitch) / 4096);
+      const f = 48 + 12 * Math.log2(Math.max(1, pitch) / 4096);
       return { idx: Math.max(0, Math.min(119, Math.round(f))), cents: Math.round((f - Math.round(f)) * 100) };
     }
 
