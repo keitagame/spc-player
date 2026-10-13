@@ -111,12 +111,14 @@ body{
   display: inline-block;
 }
 
-/* 表示サイズは400pxのまま、内部解像度を1024pxに高画質化 */
 #spcCanvas {
-  height:400px;
-  width:400px;
+  width: 1340px;
+  max-width: 100%;
+  height: auto;
+  aspect-ratio: 2 / 1;
   border: 1px solid #333;
   margin-top: 10px;
+  image-rendering: pixelated;
 }
 
 .o {
@@ -155,7 +157,7 @@ body{
 <br>
 <script src="libspc.js"></script>
 <!-- 内部解像度を 1024x1024 に拡大 -->
-<canvas id="spcCanvas" width="1024" height="1024"></canvas>
+<canvas id="spcCanvas" width="1340" height="670"></canvas>
 <br>
 <div class="o">spc player online</div>
 このサイトはweb上で.spcを再生できるspcプレイヤーです。<br>
@@ -213,149 +215,271 @@ function pitchToNote(pitch) {
     let mediaRecorder = null;
     let recordedVideoChunks = [];
 
-    // Voice peak smooth buffer
-    const voicePeakHistory = Array.from({ length: 8 }, () => ({
-      volL: 0,
-      volR: 0,
-      env: 0,
-      pitch: 0
-    }));
+    // ===== DSP700 (黒猫SPC) 風ビジュアライザー =====
+    // KuronekoSPC.exe の解析結果に基づく仕様:
+    //  - 670x335 の背景(main.jpg)の上に、スプライトシート(parts.jpg)から部品を BitBlt して描く
+    //  - 値の表示は 4x5 の小フォント(5px送り) / 時計は 6x11 の大フォント(8px送り)
+    //  - 鍵盤: 1オクターブ(35px)タイル×13種(半音ごとの点灯+無点灯)を10オクターブ分並べる
+    //  - 上部ゲージ: ENVX(0-127)の長さのバー + パン位置の1pxマーカー
+    //  - スペクトラム: 35バンド × (3px幅+1px隙間) 、 2pxピッチの32段
+    const bg = new Image();  bg.src = 'main.jpg';
+    const parts = new Image(); parts.src = 'parts.jpg';
+    const partsOK = () => parts.complete && parts.naturalWidth > 0;
+
+    let analyserSplit = null, analyserL = null, analyserR = null;
+    let fftL, fftR, tdL, tdR;
+    let tagInfo = null, fileName = '', playMs = 0, lastT = performance.now(), frameNo = 0;
+    let spinFrame = 8, spinTick = -1;
+    const voiceHist = Array.from({ length: 8 }, () => ({ lv: 0, env: 0 }));
+    const specPeak = [new Float32Array(35), new Float32Array(35)];
+    const masterHist = { l: 0, r: 0 };
+    const INK = '#e6f4ff';
+
+    // ---- スプライト座標（exe の .data にあった表から） ----
+    const BTN = {                                    // ボタン帯 (y=13..19) → テンプレ上の位置
+      play:  { s: [33, 13, 30, 7], d: [405, 32] },
+      stop:  { s: [1, 13, 31, 7],  d: [444, 32] },
+      pause: { s: [64, 13, 37, 7], d: [484, 32] }
+    };
+    // フォントスプライトの JPEG ノイズ（緑のにじみ）を除去してインク色に変換
+    let fontSheet = null;
+    function getFontSheet() {
+      if (fontSheet) return fontSheet;
+      if (!partsOK()) return null;
+      const c = document.createElement('canvas');
+      c.width = parts.naturalWidth; c.height = parts.naturalHeight;
+      const g = c.getContext('2d', { willReadFrequently: true });
+      g.drawImage(parts, 0, 0);
+      for (const [x, y, w, h, gain] of [[0, 0, 100, 13, 1.8], [0, 52, 205, 7, 1.08]]) {
+        const im = g.getImageData(x, y, w, h), d = im.data;
+        for (let k = 0; k < d.length; k += 4) {
+          const L = (d[k] + d[k + 1] + d[k + 2]) / 3;
+          const v = L < 70 ? 0 : Math.min(255, L * gain);
+          d[k] = v * 0.92; d[k + 1] = v * 0.97; d[k + 2] = v;
+        }
+        g.putImageData(im, x, y);
+      }
+      return (fontSheet = c);
+    }
+    const BIG = { '_': 10, ':': 11, ';': 12, ' ': 13 };        // 大フォント(10以降)
+    function drawBig(str, x, y) {
+      const sh = getFontSheet(); if (!sh) return;
+      for (const ch of str) {
+        const k = ch >= '0' && ch <= '9' ? ch.charCodeAt(0) - 48 : (BIG[ch] ?? 13);
+        ctx.drawImage(sh, 1 + 7 * k, 1, 6, 11, x, y, 6, 11);
+        x += 8;
+      }
+    }
+    // 小フォント: 0-9, A-Z, 'o', '+', '-', ' ', '.'  (4x5, 5px送り)
+    function smallIdx(ch) {
+      if (ch >= '0' && ch <= '9') return ch.charCodeAt(0) - 48;
+      if (ch >= 'A' && ch <= 'Z') return 10 + ch.charCodeAt(0) - 65;
+      return { 'o': 36, '+': 37, '-': 38, ' ': 39, '.': 40 }[ch] ?? 39;
+    }
+    function drawSmall(str, x, y) {
+      const sh = getFontSheet(); if (!sh) return;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(x, y, str.length * 5, 5);
+      for (const ch of str) {
+        ctx.drawImage(sh, 1 + 5 * smallIdx(ch), 53, 4, 5, x, y, 4, 5);
+        x += 5;
+      }
+    }
+    const NOTE = ['C', 'C+', 'D', 'D+', 'E', 'F', 'F+', 'G', 'G+', 'A', 'A+', 'B'];
+    // SPCピッチ → 鍵盤番号(0-119)。本家は SPC_NOTE.DLL でサンプルの基音を推定するため近似
+    function noteIndex(pitch) {
+      const f = 96 + 12 * Math.log2(Math.max(1, pitch) / 4096);
+      return { idx: Math.max(0, Math.min(119, Math.round(f))), cents: Math.round((f - Math.round(f)) * 100) };
+    }
+
+    const ANCH = [[0,0],[500,.2],[2000,.43],[4000,.64],[8000,.85],[16000,1]];
+    function freqPos(f) {
+      for (let k = 1; k < ANCH.length; k++) {
+        if (f <= ANCH[k][0]) { const a = ANCH[k-1], b = ANCH[k]; return a[1] + (f - a[0]) / (b[0] - a[0]) * (b[1] - a[1]); }
+      }
+      return 1;
+    }
+
+    function parseTag(buf) {
+      const u = new Uint8Array(buf);
+      if (u.length < 0x100 || u[0x23] !== 26) return { format: 'SPC' };
+      const dec = (o, n) => {
+        let e = o; while (e < o + n && u[e] !== 0) e++;
+        try { return new TextDecoder('shift_jis').decode(u.subarray(o, e)).trim(); }
+        catch (_) { return new TextDecoder().decode(u.subarray(o, e)).trim(); }
+      };
+      return {
+        song: dec(0x2e, 32), game: dec(0x4e, 32), dumper: dec(0x6e, 16), comment: dec(0x7e, 32),
+        date: dec(0x9e, 11), time: dec(0xa9, 3), fade: dec(0xac, 5), artist: dec(0xb1, 32),
+        emu: ['UNKNOWN', 'ZSNES', 'SNES9X'][u[0xd2]] || 'UNKNOWN', format: 'SPC'
+      };
+    }
+
+    // スペクトラム: 35バンド、3px幅+1px隙間(4px送り)、2pxピッチ32段、y=96..159
+    function drawSpectrum(an, fft, x0, ch) {
+      const N = 35, bars = new Float32Array(N);
+      if (an && player && player.playing) {
+        an.getFloatFrequencyData(fft);
+        const binHz = audioCtx.sampleRate / an.fftSize;
+        for (let k = 1; k < fft.length; k++) {
+          const j = Math.min(N - 1, Math.floor(freqPos(k * binHz) * N));
+          const v = Math.max(0, Math.min(1, (fft[k] + 105) / 105));
+          if (v > bars[j]) bars[j] = v;
+        }
+      }
+      const pk = specPeak[ch];
+      for (let j = 0; j < N; j++) {
+        pk[j] = Math.max(bars[j], pk[j] - 0.012);
+        const x = x0 + j * 4, rows = Math.round(bars[j] * 32);
+        ctx.fillStyle = '#bfe3ff';
+        for (let r = 0; r < rows; r++) ctx.fillRect(x, 158 - 2 * r, 3, 1);
+        if (pk[j] > 0.03) { ctx.fillStyle = '#fff'; ctx.fillRect(x, 158 - 2 * Math.min(31, Math.round(pk[j] * 32)), 3, 1); }
+      }
+    }
+    // チャンネル情報バー: 5px幅+1px隙間、2pxピッチ、最大32段(y=192..255)
+    function bar(x, rows, color) {
+      ctx.fillStyle = color;
+      for (let r = 0; r < Math.min(32, rows); r++) ctx.fillRect(x, 254 - 2 * r, 5, 1);
+    }
 
     function drawVisualizer() {
-      // 高解像度（1024x1024）描画用にコンテキストの状態を保存＆4倍スケール設定
+      const now = performance.now();
+      const playing = !!(player && player.playing);
+      if (playing) playMs += now - lastT;
+      lastT = now; frameNo++;
+
       ctx.save();
-      ctx.scale(4, 4);
+      ctx.scale(2, 2);
+      ctx.imageSmoothingEnabled = false;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, 670, 335);
+      if (bg.complete && bg.naturalWidth) ctx.drawImage(bg, 0, 0, 670, 335);
 
-      // Clear canvas with deep dark background
-      ctx.fillStyle = '#000000';
-      ctx.fillRect(0, 0, 256, 256);
-
-      // Draw cyber background grid
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.00)';
-      ctx.lineWidth = 1;
-      for (let x = 0; x < 256; x += 16) {
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, 256); ctx.stroke();
-      }
-      for (let y = 0; y < 256; y += 16) {
-        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(256, y); ctx.stroke();
-      }
-
-      // Fetch voice states from S-DSP engine
       const voiceStates = player ? player.getVoiceStates() : null;
 
-      // Render each voice (8 Voices, 32px height each -> total 256px)
       for (let i = 0; i < 8; i++) {
         const y0 = i * 32;
-        const hue = i * 45; // Rainbow Color Palette
-        const baseColor = `hsl(${hue}, 100%, 60%)`;
-        const dimColor = `hsl(${hue}, 60%, 25%)`;
+        const st = voiceStates ? voiceStates[i] : { envLevel: 0, volL: 0, volR: 0, pitch: 0, outSample: 0 };
+        const h = voiceHist[i];
+        const env7 = Math.max(0, Math.min(127, st.envLevel >> 4));
+        const active = env7 > 0 && st.pitch > 0;
+        const volL = Math.round(st.volL), volR = Math.round(st.volR);
 
-        const state = voiceStates ? voiceStates[i] : {
-          outSample: 0, envLevel: 0, volL: 0, volR: 0, pitch: 0
-        };
-
-        // Smooth decay physics for visualization
-        const hist = voicePeakHistory[i];
-        hist.volL = Math.max(Math.abs(state.volL), hist.volL * 0.82);
-        hist.volR = Math.max(Math.abs(state.volR), hist.volR * 0.82);
-        hist.env = Math.max(state.envLevel, hist.env * 0.85);
-        hist.pitch = Math.max(state.pitch, hist.pitch * 0.90);
-
-        // Voice row background separator
-        ctx.fillStyle = (i % 2 === 0) ? 'rgba(15, 22, 35, 0.6)' : 'rgba(10, 15, 25, 0.6)';
-        ctx.fillRect(0, y0, 256, 31);
-
-        // Active voice glow indicator
-        const isActive = state.envLevel > 10;
-        ctx.fillStyle = isActive ? baseColor : 'rgba(255,255,255,0.1)';
-        ctx.fillRect(0, y0, 3, 31);
-
-        // 1. Voice Label & Musical Note
-        ctx.font = 'bold 9px "JetBrains Mono", monospace';
-        ctx.fillStyle = baseColor;
-        ctx.fillText(`V${i + 1}`, 6, y0 + 12);
-
-        const noteStr = pitchToNote(state.pitch);
-        ctx.fillStyle = isActive ? '#ffffff' : '#475569';
-        ctx.font = '9px "JetBrains Mono", monospace';
-        ctx.fillText(noteStr.padEnd(4, ' '), 22, y0 + 12);
-
-        // 2. Vol L Bar (-128 ~ 127)
-        ctx.fillStyle = '#64748b';
-        ctx.font = '7px sans-serif';
-        ctx.fillText('L', 48, y0 + 10);
-
-        const normVolL = Math.min(1.0, hist.volL / 128);
-        ctx.fillStyle = 'rgba(255,255,255,0.08)';
-        ctx.fillRect(56, y0 + 3, 38, 8); // Track background
-        if (normVolL > 0) {
-          const barGrad = ctx.createLinearGradient(56, 0, 94, 0);
-          barGrad.addColorStop(0, dimColor);
-          barGrad.addColorStop(1, baseColor);
-          ctx.fillStyle = barGrad;
-          ctx.fillRect(56, y0 + 3, Math.floor(normVolL * 38), 8);
+        // 数値欄: TN(%3d) VL(%4d) VR(%4d) DT(%4d) / KN(4文字)
+        const tn = st.srcn ?? st.srcN ?? st.sourceNumber ?? st.source ?? 0;
+        drawSmall(String(tn).padStart(3), 121, y0 + 7);
+        drawSmall(String(volL).padStart(4), 154, y0 + 7);
+        drawSmall(String(volR).padStart(4), 191, y0 + 7);
+        let note = null;
+        if (active) {
+          note = noteIndex(st.pitch);
+          drawSmall(('o' + Math.floor(note.idx / 12) + NOTE[note.idx % 12]).padEnd(4), 80, y0 + 7);
+          drawSmall(String(note.cents).padStart(4), 289, y0 + 7);
+        } else {
+          drawSmall('    ', 80, y0 + 7);
+          drawSmall('   0', 289, y0 + 7);
         }
 
-        // 3. Vol R Bar (-128 ~ 127)
-        ctx.fillStyle = '#64748b';
-        ctx.fillText('R', 48, y0 + 22);
+        // パン位置マーカー (常に描画) : pan = (|L|-|R|)/6.4 を ±10 に丸める。逆相なら別スプライト
+        if (partsOK()) {
+          let pan = Math.round((Math.abs(volL) - Math.abs(volR)) / 6.4);
+          pan = Math.max(-10, Math.min(10, pan));
+          const px = pan > 0 ? 329 - 2 * pan : pan < 0 ? 329 + 2 * -pan : 329;
+          const inv = volL < 0 || volR < 0;
+          if (inv) ctx.drawImage(parts, 289, 38, 41, 4, 309, y0 + 1, 41, 4);
+          ctx.drawImage(parts, 331, inv ? 38 : 43, 1, 4, px, y0 + 1, 1, 4);
 
-        const normVolR = Math.min(1.0, hist.volR / 128);
-        ctx.fillStyle = 'rgba(255,255,255,0.08)';
-        ctx.fillRect(56, y0 + 15, 38, 8);
-        if (normVolR > 0) {
-          const barGrad = ctx.createLinearGradient(56, 0, 94, 0);
-          barGrad.addColorStop(0, dimColor);
-          barGrad.addColorStop(1, baseColor);
-          ctx.fillStyle = barGrad;
-          ctx.fillRect(56, y0 + 15, Math.floor(normVolR * 38), 8);
+          // アクティブ時: 先頭ブロック + ENVX の長さのバー
+          if (active) {
+            ctx.drawImage(parts, 416, 48, 13, 4, 66, y0 + 1, 13, 4);
+            const w = (env7 >> 1) * 2;
+            if (w > 0) ctx.drawImage(parts, 289, 48, Math.min(126, w), 4, 80, y0 + 1, Math.min(126, w), 4);
+            // 鍵盤: 該当オクターブだけ「点灯タイル」に差し替え
+            const oct = Math.floor(note.idx / 12), sem = note.idx % 12;
+            if (oct < 10) ctx.drawImage(parts, 1 + 35 * sem, 59, 34, 17, 1 + 35 * oct, y0 + 14, 34, 17);
+          }
         }
 
-        // 4. Envelope Bar (0 ~ 2047)
-        ctx.fillStyle = '#94a3b8';
-        ctx.font = '7px "JetBrains Mono", monospace';
-        ctx.fillText('ENV', 100, y0 + 10);
-
-        const normEnv = Math.min(1.0, hist.env / 2047);
-        ctx.fillStyle = 'rgba(255,255,255,0.08)';
-        ctx.fillRect(100, y0 + 13, 62, 11);
-        if (normEnv > 0) {
-          ctx.fillStyle = baseColor;
-          ctx.fillRect(100, y0 + 13, Math.floor(normEnv * 62), 11);
-        }
-        // Env value overlay
-        ctx.fillStyle = '#e2e8f0';
-        ctx.font = '7px "JetBrains Mono", monospace';
-        ctx.fillText(`${state.envLevel}`, 126, y0 + 21);
-
-        // 5. Pitch Bar (0 ~ 16383)
-        ctx.fillStyle = '#94a3b8';
-        ctx.font = '7px "JetBrains Mono", monospace';
-        ctx.fillText('PIT', 168, y0 + 10);
-
-        const normPitch = Math.min(1.0, hist.pitch / 16383);
-        ctx.fillStyle = 'rgba(255,255,255,0.08)';
-        ctx.fillRect(168, y0 + 13, 82, 11);
-        if (normPitch > 0) {
-          const pitchGrad = ctx.createLinearGradient(168, 0, 250, 0);
-          pitchGrad.addColorStop(0, `hsl(${hue}, 80%, 40%)`);
-          pitchGrad.addColorStop(1, `hsl(${hue}, 100%, 70%)`);
-          ctx.fillStyle = pitchGrad;
-          ctx.fillRect(168, y0 + 13, Math.floor(normPitch * 82), 11);
-        }
-        // Pitch value text overlay
-        ctx.fillStyle = '#ffffff';
-        ctx.font = '7px "JetBrains Mono", monospace';
-        ctx.fillText(`${state.pitch}`, 205, y0 + 21);
-
-        // Bottom separator line
-        ctx.fillStyle = 'rgba(255,255,255,0.05)';
-        ctx.fillRect(0, y0 + 31, 256, 1);
+        // チャンネルバー用の値: Lv = 8*log2(|out|+1) を 4行/段 で表示、減衰付き
+        const out = Math.abs(st.outSample || 0);
+        const lvNow = 8 * Math.log2(out + 1);
+        h.lv = Math.max(lvNow, h.lv - 3);
+        h.env = env7;
+        const bx = 380 + 28 * i;
+        const lvRows = Math.floor(h.lv / 4);
+        bar(bx, lvRows, '#cfe8ff');                                  // 出力レベル(L)
+        bar(bx + 6, lvRows, '#cfe8ff');                              // 出力レベル(R)
+        bar(bx + 12, Math.abs(volL) >> 2, '#8fa8ff');                // 音量 L
+        bar(bx + 18, Math.abs(volR) >> 2, '#8fa8ff');                // 音量 R
       }
 
-      // スケール状態を復元
-      ctx.restore();
+      // スペクトラムアナライザー
+      drawSpectrum(analyserL, fftL, 380, 0);
+      drawSpectrum(analyserR, fftR, 527, 1);
 
+      // マスターレベル
+      let pl = 0, pr = 0;
+      if (analyserL && playing) {
+        analyserL.getFloatTimeDomainData(tdL); analyserR.getFloatTimeDomainData(tdR);
+        for (let k = 0; k < tdL.length; k++) { pl = Math.max(pl, Math.abs(tdL[k])); pr = Math.max(pr, Math.abs(tdR[k])); }
+      }
+      masterHist.l = Math.max(8 * Math.log2(pl * 32768 + 1), masterHist.l - 3);
+      masterHist.r = Math.max(8 * Math.log2(pr * 32768 + 1), masterHist.r - 3);
+      for (let c = 0; c < 4; c++) { bar(619 + 6 * c, Math.floor(masterHist.l / 4), '#cfe8ff'); bar(643 + 6 * c, Math.floor(masterHist.r / 4), '#cfe8ff'); }
+
+      // ヘッダー
+      if (partsOK()) {
+        // スピナー: 0.1秒ごとにコマ送り(0-7)、停止中は空コマ(8)
+        const tot = Math.floor(playMs / 10);
+        if (playing) {
+          const tick = Math.floor(tot / 10);
+          if (tick !== spinTick) { spinTick = tick; spinFrame = (spinFrame + 1) % 8; }
+        } else spinFrame = 8;
+        ctx.drawImage(parts, 1 + 32 * spinFrame, 21, 31, 31, 363, 25, 31, 31);
+
+        // PLAY / PAUSE / STOP
+        const key = playing ? 'play' : (playMs > 0 ? 'pause' : 'stop');
+        const bt = BTN[key];
+        ctx.fillStyle = '#000'; ctx.fillRect(bt.d[0], bt.d[1], bt.s[2], bt.s[3]);
+        ctx.drawImage(parts, ...bt.s, bt.d[0], bt.d[1], bt.s[2], bt.s[3]);
+
+        // 時間 "%03d%s%02d_%02d"（コロンは1秒ごとに点滅）
+        const sec = Math.floor(tot / 100) % 60;
+        const mm = String(Math.min(999, Math.floor(tot / 6000))).padStart(3, '0');
+        drawBig(mm + (sec % 2 === 0 ? ':' : ';') + String(sec).padStart(2, '0') + '_' + String(tot % 100).padStart(2, '0'), 596, 19);
+        // DSP VOLUME (2桁)
+        drawBig(playing ? '99' : '00', 652, 34);
+
+        // シークゲージ: 経過/曲長 を 60 段 (2px/段)。曲長は ID666 の秒数
+        const len = tagInfo && parseInt(tagInfo.time, 10) > 0 ? parseInt(tagInfo.time, 10) : 0;
+        if (len > 0) {
+          const n = Math.max(0, Math.min(60, Math.floor(playMs / 1000 / len * 60)));
+          if (n > 0) ctx.drawImage(parts, 289, 33, n * 2, 4, 403, 23, n * 2, 4);
+        }
+      }
+
+      // PLAYING / ファイル名
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 255, 82, 14);
+      ctx.fillStyle = '#fff';
+      ctx.font = '12px "DotGothic16", monospace';
+      ctx.fillText(playing ? 'PLAYING...' : (playMs > 0 ? 'PAUSED...' : 'STOPPED...'), 0, 266);
+      ctx.font = '8px "DotGothic16", monospace';
+      ctx.fillStyle = INK;
+      ctx.fillText(fileName, 140, 265, 190);
+
+      // タグ情報（ID666）
+      if (tagInfo) {
+        const L = [tagInfo.song, tagInfo.game, tagInfo.artist, tagInfo.dumper, tagInfo.comment];
+        const R = [tagInfo.date, tagInfo.time ? tagInfo.time + ' sec' : '', tagInfo.fade ? tagInfo.fade + ' ms' : '', tagInfo.emu, tagInfo.format];
+        for (let k = 0; k < 5; k++) {
+          const y = 288 + 11.6 * k;
+          if (L[k]) ctx.fillText(L[k], 56, y, 270);
+          if (R[k]) ctx.fillText(R[k], 400, y, 255);
+        }
+      }
+
+      ctx.restore();
       animationFrameId = requestAnimationFrame(drawVisualizer);
     }
 
@@ -377,6 +501,7 @@ function pitchToNote(pitch) {
         try {
           if (scriptProcessor) originalConnect.call(this, scriptProcessor, output, input);
           if (mediaStreamDest) originalConnect.call(this, mediaStreamDest, output, input);
+          if (analyserSplit) originalConnect.call(this, analyserSplit, output, input);
         } catch (e) {
           console.error("Audio Routing Error:", e);
         }
@@ -389,6 +514,16 @@ function pitchToNote(pitch) {
 
       if (!mediaStreamDest) {
         mediaStreamDest = audioCtx.createMediaStreamDestination();
+      }
+
+      if (!analyserSplit) {
+        analyserSplit = audioCtx.createChannelSplitter(2);
+        analyserL = audioCtx.createAnalyser(); analyserR = audioCtx.createAnalyser();
+        analyserL.fftSize = analyserR.fftSize = 2048;
+        analyserL.smoothingTimeConstant = analyserR.smoothingTimeConstant = 0.7;
+        analyserSplit.connect(analyserL, 0); analyserSplit.connect(analyserR, 1);
+        fftL = new Float32Array(analyserL.frequencyBinCount); fftR = new Float32Array(analyserR.frequencyBinCount);
+        tdL = new Float32Array(analyserL.fftSize); tdR = new Float32Array(analyserR.fftSize);
       }
 
       if (!scriptProcessor) {
@@ -419,6 +554,7 @@ function pitchToNote(pitch) {
       reader.onload = (e) => {
         try {
           player.load(e.target.result);
+          tagInfo = parseTag(e.target.result); fileName = file.name; playMs = 0;
           btnPlay.disabled = false;
           btnStop.disabled = false;
           
@@ -724,6 +860,8 @@ function pitchToNote(pitch) {
     testPlay.addEventListener('click', () => {
       initAudioContext();
       player.loadUrl("down.spc");
+      fileName = "DOWN.SPC"; playMs = 0; tagInfo = null;
+      fetch("down.spc").then(r => r.arrayBuffer()).then(b => { tagInfo = parseTag(b); }).catch(() => {});
     });
 
     btnExport.addEventListener('click', () => {
