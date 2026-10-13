@@ -7,15 +7,22 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=DotGothic16&display=swap" rel="stylesheet">
+
+<!-- MP3エンコード用ライブラリ -->
+<script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
+
 <style>
 *{
   color-scheme: dark;
+  box-sizing: border-box;
 }
 body{
   font-family: "DotGothic16", sans-serif;
   font-weight: 400;
   font-style: normal;
   background:black;
+  color: white;
+  margin: 16px;
 }
 .hidden-input {
   display: none;
@@ -29,69 +36,133 @@ body{
   padding: 10px 20px;
   border-radius: 0px;
   cursor: pointer;
-  
 }
 
 /* リスト全体の「・」を消して、横並び（Flexbox）にする */
 .nav-list {
-  list-style: none;    /* 点（・）を消す */
+  list-style: none;
   padding: 0;
   margin: 0;
   font-size:13px;
-  display: flex;       /* 子要素（li）を横並びにする */
-  gap: 20px;           /* メニューごとの間隔を20pxあける */
+  display: flex;
+  flex-wrap: wrap;
+  gap: 15px;
+  align-items: center;
 }
 
-/* リンクの下線を消して色を変える（お好みで） */
-.nav-list a {
-  text-decoration: none;
-  color: #333;
-}
-.button{
-   font-family: "DotGothic16", sans-serif;
+.button, .select-box, .number-input {
+  font-family: "DotGothic16", sans-serif;
   font-weight: 400;
   background:black;
   font-size:13px;
   display: inline-block;
   border:1px solid white;
   color: white;
-  padding: 10px 20px;
+  padding: 10px 15px;
   border-radius: 0px;
+  outline: none;
+}
+
+.button {
   cursor: pointer;
 }
+
+.number-input {
+  width: 60px;
+  text-align: center;
+}
+
+.button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* エクスポート関連スタイル */
+.btn-export {
+  border-color: #00ffcc;
+  color: #00ffcc;
+}
+
+.btn-export.is-exporting {
+  background: #00ffcc;
+  color: black;
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.4; }
+  100% { opacity: 1; }
+}
+
+.export-status {
+  color: #00ffcc;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rec-dot {
+  width: 10px;
+  height: 10px;
+  background-color: #00ffcc;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+/* 表示サイズは400pxのまま、内部解像度を1024pxに高画質化 */
 #spcCanvas {
-      height:400px;
+  height:400px;
   width:400px;
-      image-rendering: pixelated;
-      image-rendering: crisp-edges;
-      
-    }
-    .o{
-      font-size:20px;
-      margin:0;
-    }
+  border: 1px solid #333;
+  margin-top: 10px;
+}
+
+.o {
+  font-size:20px;
+  margin: 10px 0 5px 0;
+}
 </style>
 </head>
 <body>
 <header>
   <nav>
     <ul class="nav-list">
-      
       <li><label class="upload-label">SPCを選択<input type="file" id="fileinput" class="hidden-input"></label></li>
       <li><button class="button" id="play" type="button">再生</button></li>
       <li><button class="button" id="stop" type="button">停止</button></li>
       <li><button class="button" id="test" type="button">DOWN.SPCを再生</button></li>
+      
+      <!-- エクスポート設定 -->
+      <li>
+        <label style="font-size:12px;">秒数: 
+          <input type="number" id="exportDuration" class="number-input" value="60" min="1" max="600"> 秒
+        </label>
+      </li>
+      <li>
+        <select id="exportFormat" class="select-box">
+          <option value="wav">WAV (.wav)</option>
+          <option value="mp3">MP3 (.mp3)</option>
+          <option value="mp4">MP4 Video (.mp4)</option>
+        </select>
+      </li>
+      <li><button class="button btn-export" id="btnExport" type="button">書き出し</button></li>
+      <li><span id="exportStatus" class="export-status" style="display: none;"><span class="rec-dot"></span><span id="exportProgress">0 / 60s (0%)</span></span></li>
     </ul>
   </nav>
-</header><br><script src="libspc.js"></script>
-<canvas id="spcCanvas" width="256" height="256" class="w-full h-full object-contain block"></canvas>
+</header>
+<br>
+<script src="libspc.js"></script>
+<!-- 内部解像度を 1024x1024 に拡大 -->
+<canvas id="spcCanvas" width="1024" height="1024"></canvas>
 <br>
 <div class="o">spc player online</div>
 このサイトはweb上で.spcを再生できるspcプレイヤーです。<br>
 正しく再生されなかったりする場合があります。<br>
 down.spcは私がテスト用に作ったファイルです。
-<script>
 
+<script>
 function pitchToNote(pitch) {
   if (!pitch) return "-";
   const freq = 32000 * pitch / 4096;
@@ -102,6 +173,7 @@ function pitchToNote(pitch) {
   const name = noteNames[((midi % 12) + 12) % 12];
   return `${name}${octave}`;
 }
+
     // Global Application State
     let player = null;
     let audioCtx = null;
@@ -112,10 +184,35 @@ function pitchToNote(pitch) {
     const ctx = canvas.getContext('2d');
     
     const fileInput = document.getElementById('fileinput');
-  const testPlay = document.getElementById('test');
+    const testPlay = document.getElementById('test');
     const btnPlay = document.getElementById('play');
     const btnStop = document.getElementById('stop');
-    
+
+    // Export DOM Elements
+    const exportDurationInput = document.getElementById('exportDuration');
+    const exportFormatSelect = document.getElementById('exportFormat');
+    const btnExport = document.getElementById('btnExport');
+    const exportStatus = document.getElementById('exportStatus');
+    const exportProgress = document.getElementById('exportProgress');
+
+    // Export State
+    let isExporting = false;
+    let exportMode = 'wav';
+    let exportTargetDuration = 60;
+    let exportStartTime = 0;
+    let exportInterval = null;
+
+    // Audio Capture Nodes & Buffers
+    let mediaStreamDest = null;
+    let scriptProcessor = null;
+    let leftChannelData = [];
+    let rightChannelData = [];
+    let totalRecordedSamples = 0;
+
+    // Video Recording (MP4)
+    let mediaRecorder = null;
+    let recordedVideoChunks = [];
+
     // Voice peak smooth buffer
     const voicePeakHistory = Array.from({ length: 8 }, () => ({
       volL: 0,
@@ -125,6 +222,10 @@ function pitchToNote(pitch) {
     }));
 
     function drawVisualizer() {
+      // 高解像度（1024x1024）描画用にコンテキストの状態を保存＆4倍スケール設定
+      ctx.save();
+      ctx.scale(4, 4);
+
       // Clear canvas with deep dark background
       ctx.fillStyle = '#000000';
       ctx.fillRect(0, 0, 256, 256);
@@ -252,28 +353,57 @@ function pitchToNote(pitch) {
         ctx.fillRect(0, y0 + 31, 256, 1);
       }
 
-      // Update timer & progress
-      if (player && player.playing) {
-        
-        
-      }
+      // スケール状態を復元
+      ctx.restore();
 
       animationFrameId = requestAnimationFrame(drawVisualizer);
-    }
-
-    function formatTime(seconds) {
-      const m = Math.floor(seconds / 60);
-      const s = Math.floor(seconds % 60);
-      return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     }
 
     function initAudioContext() {
       if (!audioCtx) {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        setupRecordingNodes();
         player = new SPCPlayer(audioCtx);
       }
       if (audioCtx.state === 'suspended') {
         audioCtx.resume();
+      }
+    }
+
+    const originalConnect = AudioNode.prototype.connect;
+    AudioNode.prototype.connect = function(destination, output, input) {
+      const res = originalConnect.apply(this, arguments);
+      if (audioCtx && destination === audioCtx.destination && this !== scriptProcessor) {
+        try {
+          if (scriptProcessor) originalConnect.call(this, scriptProcessor, output, input);
+          if (mediaStreamDest) originalConnect.call(this, mediaStreamDest, output, input);
+        } catch (e) {
+          console.error("Audio Routing Error:", e);
+        }
+      }
+      return res;
+    };
+
+    function setupRecordingNodes() {
+      if (!audioCtx) return;
+
+      if (!mediaStreamDest) {
+        mediaStreamDest = audioCtx.createMediaStreamDestination();
+      }
+
+      if (!scriptProcessor) {
+        scriptProcessor = audioCtx.createScriptProcessor(4096, 2, 2);
+        scriptProcessor.onaudioprocess = (e) => {
+          if (!isExporting) return;
+          if (exportMode === 'wav' || exportMode === 'mp3') {
+            const inputL = e.inputBuffer.getChannelData(0);
+            const inputR = e.inputBuffer.getChannelData(1);
+            leftChannelData.push(new Float32Array(inputL));
+            rightChannelData.push(new Float32Array(inputR));
+            totalRecordedSamples += inputL.length;
+          }
+        };
+        scriptProcessor.connect(audioCtx.destination);
       }
     }
 
@@ -288,17 +418,10 @@ function pitchToNote(pitch) {
       const reader = new FileReader();
       reader.onload = (e) => {
         try {
-          const meta = player.load(e.target.result);
-          
-          // Update Metadata UI
-          
-          // Enable controls
+          player.load(e.target.result);
           btnPlay.disabled = false;
           btnStop.disabled = false;
           
-
-          // Start auto playback
-          startPlayback();
         } catch (err) {
           console.error(err);
           showNotice('SPCファイルの読み込みに失敗しました。');
@@ -310,23 +433,276 @@ function pitchToNote(pitch) {
     function startPlayback() {
       if (!player) return;
       player.play();
-      
     }
 
     function pausePlayback() {
       if (!player) return;
       player.stop();
-      playIcon.className = 'fa-solid fa-play text-xl ml-1';
-      timeStatus.textContent = 'PAUSED';
-      timeStatus.className = 'text-amber-400 font-bold uppercase';
+      if (isExporting) {
+        stopExport(false);
+      }
     }
 
     function showNotice(msg) {
       const banner = document.createElement('div');
-      banner.className = 'fixed top-4 right-4 bg-red-600 text-white px-4 py-2 rounded-xl text-xs shadow-2xl font-mono z-50 animate-bounce';
+      banner.style.position = 'fixed';
+      banner.style.top = '10px';
+      banner.style.right = '10px';
+      banner.style.background = '#e11d48';
+      banner.style.color = '#fff';
+      banner.style.padding = '10px 15px';
+      banner.style.border = '1px solid white';
+      banner.style.fontFamily = '"DotGothic16", sans-serif';
+      banner.style.zIndex = '9999';
       banner.textContent = msg;
       document.body.appendChild(banner);
       setTimeout(() => banner.remove(), 3000);
+    }
+
+    // --- 秒数指定エクスポート処理 ---
+
+    function startExport() {
+      initAudioContext();
+
+      if (!player) {
+        showNotice('SPCファイルを選択するか、DOWN.SPCを読み込んでください。');
+        return;
+      }
+
+      exportTargetDuration = parseInt(exportDurationInput.value, 10) || 60;
+      exportMode = exportFormatSelect.value;
+      isExporting = true;
+      exportStartTime = Date.now();
+
+      btnExport.textContent = '中止';
+      btnExport.classList.add('is-exporting');
+      exportStatus.style.display = 'inline-flex';
+
+      if (!player.playing) {
+        startPlayback();
+      }
+
+      if (exportMode === 'wav' || exportMode === 'mp3') {
+        leftChannelData = [];
+        rightChannelData = [];
+        totalRecordedSamples = 0;
+      } else if (exportMode === 'mp4') {
+        recordedVideoChunks = [];
+
+        // 高画質フレームレート（60FPS）でキャプチャ
+        const canvasStream = canvas.captureStream(60);
+        const audioTrack = mediaStreamDest.stream.getAudioTracks()[0];
+
+        const combinedStream = new MediaStream();
+        canvasStream.getVideoTracks().forEach(track => combinedStream.addTrack(track));
+        if (audioTrack) {
+          combinedStream.addTrack(audioTrack);
+        }
+
+        let mimeType = 'video/mp4;codecs=avc1,mp4a.40.2';
+        if (!MediaRecorder.isTypeSupported(mimeType)) {
+          if (MediaRecorder.isTypeSupported('video/mp4')) {
+            mimeType = 'video/mp4';
+          } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')) {
+            mimeType = 'video/webm;codecs=vp9,opus';
+          } else {
+            mimeType = 'video/webm';
+          }
+        }
+
+        try {
+          mediaRecorder = new MediaRecorder(combinedStream, { 
+            mimeType: mimeType,
+            videoBitsPerSecond: 5000000 // ビットレートを5Mbpsに上げて画質を向上
+          });
+        } catch (e) {
+          mediaRecorder = new MediaRecorder(combinedStream);
+        }
+
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) {
+            recordedVideoChunks.push(e.data);
+          }
+        };
+
+        mediaRecorder.onstop = () => {
+          const actualMime = mediaRecorder.mimeType || 'video/mp4';
+          const ext = actualMime.includes('mp4') ? 'mp4' : 'webm';
+          const blob = new Blob(recordedVideoChunks, { type: actualMime });
+          downloadBlob(blob, `spc_export_${exportTargetDuration}s.${ext}`);
+        };
+
+        mediaRecorder.start(100);
+      }
+
+      exportInterval = setInterval(() => {
+        const elapsed = (Date.now() - exportStartTime) / 1000;
+        const progressPercent = Math.min(100, Math.floor((elapsed / exportTargetDuration) * 100));
+        
+        exportProgress.textContent = `${Math.floor(elapsed)} / ${exportTargetDuration}s (${progressPercent}%)`;
+
+        if (elapsed >= exportTargetDuration) {
+          stopExport(true);
+        }
+      }, 100);
+    }
+
+    function stopExport(saveFile = true) {
+      if (!isExporting) return;
+      isExporting = false;
+
+      clearInterval(exportInterval);
+      btnExport.textContent = '書き出し';
+      btnExport.classList.remove('is-exporting');
+      exportStatus.style.display = 'none';
+
+      if (saveFile) {
+        if (exportMode === 'wav') {
+          exportWAV();
+        } else if (exportMode === 'mp3') {
+          exportMP3();
+        } else if (exportMode === 'mp4') {
+          if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+          }
+        }
+      } else {
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+          mediaRecorder.stop();
+        }
+        showNotice('書き出しをキャンセルしました。');
+      }
+    }
+
+    function exportWAV() {
+      if (totalRecordedSamples === 0) {
+        showNotice('データが取得できませんでした。');
+        return;
+      }
+      const sampleRate = audioCtx.sampleRate;
+      const mergedL = new Float32Array(totalRecordedSamples);
+      const mergedR = new Float32Array(totalRecordedSamples);
+
+      let offset = 0;
+      for (let i = 0; i < leftChannelData.length; i++) {
+        mergedL.set(leftChannelData[i], offset);
+        mergedR.set(rightChannelData[i], offset);
+        offset += leftChannelData[i].length;
+      }
+
+      const wavBuffer = createWavFileHeader(mergedL, mergedR, sampleRate);
+      const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+      downloadBlob(blob, `spc_audio_${exportTargetDuration}s.wav`);
+    }
+
+    function createWavFileHeader(left, right, sampleRate) {
+      const numChannels = 2;
+      const bitsPerSample = 16;
+      const bytesPerSample = bitsPerSample / 8;
+      const blockAlign = numChannels * bytesPerSample;
+      const numSamples = left.length;
+      const dataSize = numSamples * blockAlign;
+      const buffer = new ArrayBuffer(44 + dataSize);
+      const view = new DataView(buffer);
+
+      function writeString(view, offset, string) {
+        for (let i = 0; i < string.length; i++) {
+          view.setUint8(offset + i, string.charCodeAt(i));
+        }
+      }
+
+      writeString(view, 0, 'RIFF');
+      view.setUint32(4, 36 + dataSize, true);
+      writeString(view, 8, 'WAVE');
+      writeString(view, 12, 'fmt ');
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, numChannels, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * blockAlign, true);
+      view.setUint16(32, blockAlign, true);
+      view.setUint16(34, bitsPerSample, true);
+      writeString(view, 36, 'data');
+      view.setUint32(40, dataSize, true);
+
+      let offset = 44;
+      for (let i = 0; i < numSamples; i++) {
+        let sL = Math.max(-1, Math.min(1, left[i]));
+        let sR = Math.max(-1, Math.min(1, right[i]));
+        view.setInt16(offset, sL < 0 ? sL * 0x8000 : sL * 0x7FFF, true);
+        offset += 2;
+        view.setInt16(offset, sR < 0 ? sR * 0x8000 : sR * 0x7FFF, true);
+        offset += 2;
+      }
+
+      return buffer;
+    }
+
+    function exportMP3() {
+      if (typeof lamejs === 'undefined') {
+        showNotice('lamejsライブラリの読み込みに失敗しています。');
+        return;
+      }
+      if (totalRecordedSamples === 0) {
+        showNotice('データが取得できませんでした。');
+        return;
+      }
+
+      const sampleRate = audioCtx.sampleRate;
+      const mp3encoder = new lamejs.Mp3Encoder(2, sampleRate, 128);
+      const mp3Data = [];
+
+      const mergedL = new Float32Array(totalRecordedSamples);
+      const mergedR = new Float32Array(totalRecordedSamples);
+
+      let offset = 0;
+      for (let i = 0; i < leftChannelData.length; i++) {
+        mergedL.set(leftChannelData[i], offset);
+        mergedR.set(rightChannelData[i], offset);
+        offset += leftChannelData[i].length;
+      }
+
+      const leftInt16 = new Int16Array(totalRecordedSamples);
+      const rightInt16 = new Int16Array(totalRecordedSamples);
+
+      for (let i = 0; i < totalRecordedSamples; i++) {
+        let sL = Math.max(-1, Math.min(1, mergedL[i]));
+        let sR = Math.max(-1, Math.min(1, mergedR[i]));
+        leftInt16[i] = sL < 0 ? sL * 0x8000 : sL * 0x7FFF;
+        rightInt16[i] = sR < 0 ? sR * 0x8000 : sR * 0x7FFF;
+      }
+
+      const sampleBlockSize = 1152;
+      for (let i = 0; i < totalRecordedSamples; i += sampleBlockSize) {
+        const leftChunk = leftInt16.subarray(i, i + sampleBlockSize);
+        const rightChunk = rightInt16.subarray(i, i + sampleBlockSize);
+        const mp3buf = mp3encoder.encodeBuffer(leftChunk, rightChunk);
+        if (mp3buf.length > 0) {
+          mp3Data.push(mp3buf);
+        }
+      }
+
+      const mp3buf = mp3encoder.flush();
+      if (mp3buf.length > 0) {
+        mp3Data.push(mp3buf);
+      }
+
+      const blob = new Blob(mp3Data, { type: 'audio/mp3' });
+      downloadBlob(blob, `spc_audio_${exportTargetDuration}s.mp3`);
+    }
+
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.style.display = 'none';
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+      }, 100);
     }
 
     // Event Listeners
@@ -341,24 +717,29 @@ function pitchToNote(pitch) {
 
     btnStop.addEventListener('click', () => {
       if (player) {
-        player.stop();
-        
-        
+        pausePlayback();
       }
     });
-testPlay.addEventListener('click', () => {
-     initAudioContext();
+
+    testPlay.addEventListener('click', () => {
+      initAudioContext();
       player.loadUrl("down.spc");
     });
-    
-    
+
+    btnExport.addEventListener('click', () => {
+      if (isExporting) {
+        stopExport(false);
+      } else {
+        startExport();
+      }
+    });
+
     // File Input Drag & Drop
     fileInput.addEventListener('change', (e) => {
       if (e.target.files.length > 0) {
         handleFile(e.target.files[0]);
       }
     });
-
 
     // Start Rendering Loop on Window Load
     window.onload = () => {
