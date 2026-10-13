@@ -248,7 +248,7 @@ function pitchToNote(pitch) {
       const c = document.createElement('canvas');
       c.width = parts.naturalWidth; c.height = parts.naturalHeight;
       const g = c.getContext('2d', { willReadFrequently: true });
-      //g.drawImage(parts, 0, 0);
+      g.drawImage(parts, 0, 0);
       for (const [x, y, w, h, gain] of [[0, 0, 100, 13, 1.8], [0, 52, 205, 7, 1.08]]) {
         const im = g.getImageData(x, y, w, h), d = im.data;
         for (let k = 0; k < d.length; k += 4) {
@@ -256,7 +256,7 @@ function pitchToNote(pitch) {
           const v = L < 70 ? 0 : Math.min(255, L * gain);
           d[k] = v * 0.92; d[k + 1] = v * 0.97; d[k + 2] = v;
         }
-        //g.putImageData(im, x, y);
+        g.putImageData(im, x, y);
       }
       return (fontSheet = c);
     }
