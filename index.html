@@ -215,13 +215,6 @@ function pitchToNote(pitch) {
     let mediaRecorder = null;
     let recordedVideoChunks = [];
 
-    // ===== DSP700 (黒猫SPC) 風ビジュアライザー =====
-    // KuronekoSPC.exe の解析結果に基づく仕様:
-    //  - 670x335 の背景(main.jpg)の上に、スプライトシート(parts.jpg)から部品を BitBlt して描く
-    //  - 値の表示は 4x5 の小フォント(5px送り) / 時計は 6x11 の大フォント(8px送り)
-    //  - 鍵盤: 1オクターブ(35px)タイル×13種(半音ごとの点灯+無点灯)を10オクターブ分並べる
-    //  - 上部ゲージ: ENVX(0-127)の長さのバー + パン位置の1pxマーカー
-    //  - スペクトラム: 35バンド × (3px幅+1px隙間) 、 2pxピッチの32段
     const bg = new Image();  bg.src = 'main.jpg';
     const parts = new Image(); parts.src = 'parts.jpg';
     const partsOK = () => parts.complete && parts.naturalWidth > 0;
