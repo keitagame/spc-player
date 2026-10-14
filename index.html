@@ -9,21 +9,21 @@
 <meta name="description" content="Webブラウザ上でスーパーファミコン（SNES）の音源ファイル（.spc）を直接再生・可視化できる無料のオンラインSPCプレイヤーです。WAV、MP3、MP4動画へのエクスポートにも対応。">
 <meta name="keywords" content="SPC, SPC Player, スーパーファミコン, SNES, BGM再生, オンラインプレイヤー, WAV変換, MP3変換, ビジュアルアナライザー">
 <meta name="robots" content="index, follow">
-<link rel="canonical" href="https://keitagame.github.io/spc-player">
+<link rel="canonical" href="https://spc.shinte.tech">
 
 <!-- Open Graph / OGP (SNSシェア対策) -->
 <meta property="og:type" content="website">
 <meta property="og:title" content="SPC Player Online - ブラウザで.spcファイルを再生・エクスポート">
 <meta property="og:description" content="Webブラウザ上でスーパーファミコン音源ファイル（.spc）を高品質再生・ビジュアル可視化。WAV / MP3 / MP4書き出し対応。">
-<meta property="og:url" content="https://keitagame.github.io/spc-player">
-<meta property="og:image" content="https://keitagame.github.io/spc-player/spc.png">
+<meta property="og:url" content="https://spc.shinte.tech">
+<meta property="og:image" content="https://spc.shinte.tech/spc.png">
 <meta property="og:site_name" content="SPC Player Online">
 
 <!-- Twitter Card -->
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="SPC Player Online - ブラウザで.spcファイルを再生">
-<meta name="twitter:description" content="Webブラウザ上で.spc音源を直接再生・可視化・各種フォーマット変換ができるオンラインツール。">
-<meta name="twitter:image" content="https://keitagame.github.io/spc-player/spc.png">
+<meta property="twitter:description" content="Webブラウザ上で.spc音源を直接再生・可視化・各種フォーマット変換ができるオンラインツール。">
+<meta name="twitter:image" content="https://spc.shinte.tech/spc.png">
 
 <!-- Favicon -->
 <link rel="icon" type="image/png" href="spc.png">
@@ -34,7 +34,7 @@
   "@context": "https://schema.org",
   "@type": "WebApplication",
   "name": "SPC Player Online",
-  "url": "https://keitagame.github.io/spc-player/",
+  "url": "https://spc.shinte.tech",
   "description": "Webブラウザ上でスーパーファミコン音源（.spc）をリアルタイム可視化・再生し、WAV/MP3/MP4形式に書き出せるツールです。",
   "applicationCategory": "MultimediaApplication",
   "operatingSystem": "All",
@@ -178,7 +178,6 @@ h1.title-main {
 
 .info-text {
   font-size: 14px;
-  
 }
 </style>
 </head>
@@ -196,6 +195,13 @@ h1.title-main {
       <li><button class="button" id="stop" type="button" aria-label="停止">停止</button></li>
       <li><button class="button" id="test" type="button" aria-label="テスト用DOWN.SPCを再生">DOWN.SPCを再生</button></li>
       
+      <!-- モノラル再生切り替え -->
+      <li style="display:none">
+        <label style="font-size:13px; cursor:pointer; display:inline-flex; align-items:center; gap:5px;">
+          <input type="checkbox" id="chkMono" aria-label="モノラル再生"> モノラル
+        </label>
+      </li>
+
       <!-- エクスポート設定 -->
       <li>
         <label style="font-size:12px;">秒数: 
@@ -253,6 +259,9 @@ function pitchToNote(pitch) {
     let audioCtx = null;
     let animationFrameId = null;
 
+    // Mono Node
+    let monoNode = null;
+
     // DOM Elements
     const canvas = document.getElementById('spcCanvas');
     const ctx = canvas.getContext('2d');
@@ -263,6 +272,7 @@ function pitchToNote(pitch) {
     const testPlay = document.getElementById('test');
     const btnPlay = document.getElementById('play');
     const btnStop = document.getElementById('stop');
+    const chkMono = document.getElementById('chkMono');
 
     // Export DOM Elements
     const exportDurationInput = document.getElementById('exportDuration');
@@ -350,6 +360,20 @@ function pitchToNote(pitch) {
       for (const ch of str) {
         ctx.drawImage(sh, 1 + 5 * smallIdx(ch), 53, 4, 5, x, y, 4, 5);
         x += 5;
+      }
+    }
+    // タグ/ファイル名用: parts.jpg の小フォント(4x5, 5px送り)で文字列を描画
+    // 使える文字は 0-9 A-Z + - . のみ。全角英数は半角化、小文字は大文字化、それ以外は空白扱い
+    function drawSmallText(str, x, y, maxW) {
+      if (!partsOK()) return;
+      const maxN = Math.floor(maxW / 5);
+      let n = 0;
+      for (const raw of String(str ?? '').normalize('NFKC').toUpperCase()) {
+        if (n >= maxN) break;
+        if (/[0-9A-Z+\-.]/.test(raw)) {
+          ctx.drawImage(parts, 1 + 5 * smallIdx(raw), 53, 4, 5, x + 5 * n, y, 4, 5);
+        }
+        n++;
       }
     }
     const NOTE = ['C', 'C+', 'D', 'D+', 'E', 'F', 'F+', 'G', 'G+', 'A', 'A+', 'B'];
@@ -527,22 +551,20 @@ function pitchToNote(pitch) {
 
       // PLAYING / ファイル名
       ctx.fillStyle = '#000';
-      ctx.fillRect(0, 255, 82, 14);
+      //ctx.fillRect(0, 255, 82, 14);
       ctx.fillStyle = '#fff';
       ctx.font = '12px "DotGothic16", monospace';
-      ctx.fillText(playing ? 'PLAYING...' : (playMs > 0 ? 'PAUSED...' : 'STOPPED...'), 0, 266);
-      ctx.font = '8px "DotGothic16", monospace';
-      ctx.fillStyle = INK;
-      ctx.fillText(fileName, 140, 265, 190);
+      //ctx.fillText(playing ? 'PLAYING...' : (playMs > 0 ? 'PAUSED...' : 'STOPPED...'), 0, 266);
+      drawSmallText(fileName, 140, 260, 190);
 
       // タグ情報（ID666）
       if (tagInfo) {
         const L = [tagInfo.song, tagInfo.game, tagInfo.artist, tagInfo.dumper, tagInfo.comment];
         const R = [tagInfo.date, tagInfo.time ? tagInfo.time + ' sec' : '', tagInfo.fade ? tagInfo.fade + ' ms' : '', tagInfo.emu, tagInfo.format];
         for (let k = 0; k < 5; k++) {
-          const y = 288 + 11.6 * k;
-          if (L[k]) ctx.fillText(L[k], 56, y, 270);
-          if (R[k]) ctx.fillText(R[k], 400, y, 255);
+          const y = 280 + 12 * k;   // ラベル(SONGNAME等)と同じ行の高さ
+          if (L[k]) drawSmallText(L[k], 56, y, 270);
+          if (R[k]) drawSmallText(R[k], 400, y, 255);
         }
       }
 
@@ -561,26 +583,43 @@ function pitchToNote(pitch) {
       }
     }
 
+    // モノラル切り替え処理
+    function updateMonoMode() {
+      if (!monoNode) return;
+      if (chkMono && chkMono.checked) {
+        monoNode.channelCount = 1;
+        monoNode.channelCountMode = 'explicit';
+        monoNode.channelInterpretation = 'speakers';
+      } else {
+        monoNode.channelCount = 2;
+        monoNode.channelCountMode = 'max';
+        monoNode.channelInterpretation = 'speakers';
+      }
+    }
+
     const originalConnect = AudioNode.prototype.connect;
     AudioNode.prototype.connect = function(destination, output, input) {
-      const res = originalConnect.apply(this, arguments);
-      if (audioCtx && destination === audioCtx.destination && this !== scriptProcessor) {
-        try {
-          if (scriptProcessor) originalConnect.call(this, scriptProcessor, output, input);
-          if (mediaStreamDest) originalConnect.call(this, mediaStreamDest, output, input);
-          if (analyserSplit) originalConnect.call(this, analyserSplit, output, input);
-        } catch (e) {
-          console.error("Audio Routing Error:", e);
+      // プレーヤー等のノードが destination につなごうとした場合、monoNode にルーティング
+      if (audioCtx && destination === audioCtx.destination && this !== monoNode && this !== scriptProcessor) {
+        if (monoNode) {
+          return originalConnect.call(this, monoNode, output, input);
         }
       }
-      return res;
+      return originalConnect.apply(this, arguments);
     };
 
     function setupRecordingNodes() {
       if (!audioCtx) return;
 
+      if (!monoNode) {
+        monoNode = audioCtx.createGain();
+        updateMonoMode();
+        originalConnect.call(monoNode, audioCtx.destination);
+      }
+
       if (!mediaStreamDest) {
         mediaStreamDest = audioCtx.createMediaStreamDestination();
+        originalConnect.call(monoNode, mediaStreamDest);
       }
 
       if (!analyserSplit) {
@@ -591,6 +630,7 @@ function pitchToNote(pitch) {
         analyserSplit.connect(analyserL, 0); analyserSplit.connect(analyserR, 1);
         fftL = new Float32Array(analyserL.frequencyBinCount); fftR = new Float32Array(analyserR.frequencyBinCount);
         tdL = new Float32Array(analyserL.fftSize); tdR = new Float32Array(analyserR.fftSize);
+        originalConnect.call(monoNode, analyserSplit);
       }
 
       if (!scriptProcessor) {
@@ -606,6 +646,7 @@ function pitchToNote(pitch) {
           }
         };
         scriptProcessor.connect(audioCtx.destination);
+        originalConnect.call(monoNode, scriptProcessor);
       }
     }
 
@@ -923,6 +964,8 @@ function pitchToNote(pitch) {
         pausePlayback();
       }
     });
+
+    chkMono.addEventListener('change', updateMonoMode);
 
     testPlay.addEventListener('click', () => {
       initAudioContext();
