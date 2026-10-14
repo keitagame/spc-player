@@ -2,12 +2,55 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=1200">
-<title>SPC Player</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<!-- SEO基本メタタグ -->
+<title>SPC Player Online - ブラウザで.spcファイルを再生・変換・エクスポート</title>
+<meta name="description" content="Webブラウザ上でスーパーファミコン（SNES）の音源ファイル（.spc）を直接再生・可視化できる無料のオンラインSPCプレイヤーです。WAV、MP3、MP4動画へのエクスポートにも対応。">
+<meta name="keywords" content="SPC, SPC Player, スーパーファミコン, SNES, BGM再生, オンラインプレイヤー, WAV変換, MP3変換, ビジュアルアナライザー">
+<meta name="robots" content="index, follow">
+<link rel="canonical" href="https://keitagame.github.io/spc-player">
+
+<!-- Open Graph / OGP (SNSシェア対策) -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="SPC Player Online - ブラウザで.spcファイルを再生・エクスポート">
+<meta property="og:description" content="Webブラウザ上でスーパーファミコン音源ファイル（.spc）を高品質再生・ビジュアル可視化。WAV / MP3 / MP4書き出し対応。">
+<meta property="og:url" content="https://keitagame.github.io/spc-player">
+<meta property="og:image" content="https://keitagame.github.io/spc-player/spc.png">
+<meta property="og:site_name" content="SPC Player Online">
+
+<!-- Twitter Card -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="SPC Player Online - ブラウザで.spcファイルを再生">
+<meta name="twitter:description" content="Webブラウザ上で.spc音源を直接再生・可視化・各種フォーマット変換ができるオンラインツール。">
+<meta name="twitter:image" content="https://keitagame.github.io/spc-player/spc.png">
+
+<!-- Favicon -->
+<link rel="icon" type="image/png" href="spc.png">
+
+<!-- 構造化データ (JSON-LD) -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  "name": "SPC Player Online",
+  "url": "https://keitagame.github.io/spc-player/",
+  "description": "Webブラウザ上でスーパーファミコン音源（.spc）をリアルタイム可視化・再生し、WAV/MP3/MP4形式に書き出せるツールです。",
+  "applicationCategory": "MultimediaApplication",
+  "operatingSystem": "All",
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "JPY"
+  }
+}
+</script>
+
+<!-- フォント最適化 -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=DotGothic16&display=swap" rel="stylesheet">
-<link rel="icon" type="image/png" href="spc.png">
+
 <!-- MP3エンコード用ライブラリ -->
 <script src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 
@@ -20,9 +63,10 @@ body{
   font-family: "DotGothic16", sans-serif;
   font-weight: 400;
   font-style: normal;
-  background:black;
+  background: black;
   color: white;
   margin: 16px;
+  line-height: 1.6;
 }
 .hidden-input {
   display: none;
@@ -31,7 +75,7 @@ body{
 /* ラベルをボタンとして装飾する */
 .upload-label {
   display: inline-block;
-  border:1px solid white;
+  border: 1px solid white;
   color: white;
   padding: 10px 20px;
   border-radius: 0px;
@@ -43,7 +87,7 @@ body{
   list-style: none;
   padding: 0;
   margin: 0;
-  font-size:13px;
+  font-size: 13px;
   display: flex;
   flex-wrap: wrap;
   gap: 15px;
@@ -53,10 +97,10 @@ body{
 .button, .select-box, .number-input {
   font-family: "DotGothic16", sans-serif;
   font-weight: 400;
-  background:black;
-  font-size:13px;
+  background: black;
+  font-size: 13px;
   display: inline-block;
-  border:1px solid white;
+  border: 1px solid white;
   color: white;
   padding: 10px 15px;
   border-radius: 0px;
@@ -119,54 +163,78 @@ body{
   border: 1px solid #333;
   margin-top: 10px;
   image-rendering: pixelated;
+  display: block;
 }
 
-.o {
-  font-size:20px;
+.info-container {
+  margin-top: 15px;
+}
+
+h1.title-main {
+  font-size: 20px;
   margin: 10px 0 5px 0;
+  font-weight: normal;
+}
+
+.info-text {
+  font-size: 14px;
+  
 }
 </style>
 </head>
 <body>
+
 <header>
-  <nav>
+  <nav aria-label="プレイヤー操作メニュー">
     <ul class="nav-list">
-      <li><label class="upload-label">SPCを選択<input type="file" id="fileinput" accept=".spc" class="hidden-input"></label></li>
+      <li><label class="upload-label">SPCを選択<input type="file" id="fileinput" accept=".spc" class="hidden-input" aria-label="SPCファイルを選択"></label></li>
       <!-- 画像アップロード用の追加項目 -->
-      <li><label class="upload-label">背景画像を選択<input type="file" id="bgInput" class="hidden-input" accept="image/*"></label></li>
-      <li><label class="upload-label">パーツ画像を選択<input type="file" id="partsInput" class="hidden-input" accept="image/*"></label></li>
+      <li><label class="upload-label">背景画像を選択<input type="file" id="bgInput" class="hidden-input" accept="image/*" aria-label="背景画像を選択"></label></li>
+      <li><label class="upload-label">パーツ画像を選択<input type="file" id="partsInput" class="hidden-input" accept="image/*" aria-label="パーツ画像を選択"></label></li>
       
-      <li><button class="button" id="play" type="button">再生</button></li>
-      <li><button class="button" id="stop" type="button">停止</button></li>
-      <li><button class="button" id="test" type="button">DOWN.SPCを再生</button></li>
+      <li><button class="button" id="play" type="button" aria-label="再生/一時停止">再生</button></li>
+      <li><button class="button" id="stop" type="button" aria-label="停止">停止</button></li>
+      <li><button class="button" id="test" type="button" aria-label="テスト用DOWN.SPCを再生">DOWN.SPCを再生</button></li>
       
       <!-- エクスポート設定 -->
       <li>
         <label style="font-size:12px;">秒数: 
-          <input type="number" id="exportDuration" class="number-input" value="60" min="1" max="600"> 秒
+          <input type="number" id="exportDuration" class="number-input" value="60" min="1" max="600" aria-label="エクスポート秒数"> 秒
         </label>
       </li>
       <li>
-        <select id="exportFormat" class="select-box">
+        <select id="exportFormat" class="select-box" aria-label="エクスポートフォーマット">
           <option value="wav">WAV (.wav)</option>
           <option value="mp3">MP3 (.mp3)</option>
           <option value="mp4">MP4 Video (.mp4)</option>
         </select>
       </li>
-      <li><button class="button btn-export" id="btnExport" type="button">書き出し</button></li>
+      <li><button class="button btn-export" id="btnExport" type="button" aria-label="ファイルを書き出し">書き出し</button></li>
       <li><span id="exportStatus" class="export-status" style="display: none;"><span class="rec-dot"></span><span id="exportProgress">0 / 60s (0%)</span></span></li>
     </ul>
   </nav>
 </header>
-<br>
+
+<main>
+  <!-- 内部解像度を 1340x670 に保持 -->
+  <section aria-label="ビジュアルプレイヤー画面">
+    <canvas id="spcCanvas" width="1340" height="670" aria-label="SPC音源アナライザー画面"></canvas>
+  </section>
+
+  <article class="info-container">
+    <h1 class="title-main">SPC Player Online (オンラインSPCプレイヤー)</h1>
+    <p class="info-text">
+      このサイトはWebブラウザ上で<code>.spc</code>（スーパーファミコン/SNES音源）ファイルをインストール不要で高音質再生・リアルタイム可視化できるオンラインSPCプレイヤーです。<br>
+      オーディオアナライザーによるビジュアル可視化機能に加え、指定秒数でのWAV / MP3音声書き出しやMP4動画保存にも対応しています。
+    </p>
+    <p class="info-text" style="font-size:12px;">
+      ※ ファイルやご利用の環境によっては正しく再生されない場合があります。<br>
+      ※ 「DOWN.SPC」ボタンを押すと、動作確認用のサンプル楽曲をテスト再生できます。
+    </p>
+  </article>
+</main>
+
 <script src="libspc.js"></script>
-<!-- 内部解像度を 1024x1024 に拡大 -->
-<canvas id="spcCanvas" width="1340" height="670"></canvas>
-<br>
-<div class="o">spc player online</div>
-このサイトはweb上で.spcを再生できるspcプレイヤーです。<br>
-正しく再生されなかったりする場合があります。<br>
-down.spcは私がテスト用に作ったファイルです。
 
 <script>
 function pitchToNote(pitch) {
