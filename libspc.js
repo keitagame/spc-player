@@ -751,18 +751,36 @@ const COUNTER_RATES = [
 // --- タップ数の設定（6 または 8 などを指定）---
 const TAPS = 4; 
 const HALF_TAPS = TAPS / 2;
+const FC = 0.6; 
 
 const SINC_TABLE = (() => {
   const table = new Float32Array(256 * TAPS);
+
+  
   const sinc = (x) => {
-    if (Math.abs(x) < 1e-6) return 1.0;
-    const px = Math.PI * x;
+    const fx = x * FC;
+    if (Math.abs(fx) < 1e-6) return 1.0;
+    const px = Math.PI * fx;
     return Math.sin(px) / px;
   };
+
+  // Hann 窓
+  const hannWindow = (x) => {
+    return 0.5 + 0.5 * Math.cos((Math.PI * x) / HALF_TAPS);
+  };
+
+  // Blackman 窓 (より強力に高周波の減衰・サイドローブ抑制を行いたい場合)
+  const blackmanWindow = (x) => {
+    return 0.42 + 0.5 * Math.cos((Math.PI * x) / HALF_TAPS) + 0.08 * Math.cos((2 * Math.PI * x) / HALF_TAPS);
+  };
+
   const windowedSinc = (x) => {
     const ax = Math.abs(x);
     if (ax >= HALF_TAPS) return 0.0;
-    return sinc(x) * sinc(x / HALF_TAPS); // Lanczos 窓関数
+    
+    // 【選択】Hann 窓または Blackman 窓を選択
+    //return sinc(x) * hannWindow(x);
+    return sinc(x) * blackmanWindow(x);
   };
 
   for (let i = 0; i < 256; i++) {
@@ -801,7 +819,7 @@ class DSP {
         pitchCounter: 0,
         history: [0, 0],
         decodedBlock: new Int16Array(16),
-        interp: new Float64Array(4),
+        interp: new Float64Array(16),
         curBlockHeader: 0,
         keyOn: false,
         keyOff: false,
@@ -992,17 +1010,18 @@ getVoiceRegisters(v) {
   }
 
   clockNoise() {
-    const rate = this.flg & 0x1f;
-    if (this._rateFires(rate)) {
-      const lfsr = this.noiseLFSR;
-      const fb = (lfsr ^ (lfsr >> 1)) & 1;
-      this.noiseLFSR = ((lfsr >> 1) & 0x3fff) | (fb << 14);
-    }
+  const rate = this.flg & 0x1f;
+  if (rate > 0 && this._rateFires(rate)) {
+    // 15bit LFSR: bit0 と bit1 の XOR を bit14 にフィードバック
+    const feedback = (this.noiseLFSR ^ (this.noiseLFSR >> 1)) & 1;
+    this.noiseLFSR = (this.noiseLFSR >> 1) | (feedback << 14);
   }
+}
 
   noiseSample() {
-    return ((this.noiseLFSR << 17) >> 17);
-  }
+  // LFSR(15bit)の最下位ビット(0か1)を符号付きの波形値に変換 (-0x4000 〜 0x3fff 程度)
+  return (this.noiseLFSR & 1) ? -0x4000 : 0x3fff;
+}
 
   stepEnvelope(voice, vIdx) {
     const a1 = this.adsr1(vIdx);
@@ -1209,8 +1228,9 @@ getVoiceRegisters(v) {
       let sample = Math.round(gs) >> 1;
 
       if (this.non & bit) {
-        sample = this.noiseSample();
-      }
+  // 15bit LFSRの最下位ビットから適切な振幅（±16384）を作る
+  sample = (this.noiseLFSR & 1) ? -16384 : 16383;
+}
 
       const env = this.stepEnvelope(voice, i);
       sample = (sample * env) >> 11;
