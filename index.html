@@ -166,6 +166,12 @@ body{
   display: block;
 }
 
+#spcCanvas.scope {
+  width: 1600px;
+  aspect-ratio: 16 / 9;
+  image-rendering: auto;
+}
+
 .info-container {
   margin-top: 15px;
 }
@@ -193,6 +199,7 @@ h1.title-main {
       
       <li><button class="button" id="play" type="button" aria-label="再生/一時停止">再生</button></li>
       <li><button class="button" id="stop" type="button" aria-label="停止">停止</button></li>
+      <li><button class="button" id="btnView" type="button" aria-label="表示切替">オシロスコープ表示</button></li>
       <li><button class="button" id="test" type="button" aria-label="テスト用DOWN.SPCを再生">DOWN.SPCを再生</button></li>
       
       <!-- モノラル再生切り替え -->
@@ -433,11 +440,139 @@ function pitchToNote(pitch) {
       for (let r = 0; r < Math.min(32, rows); r++) ctx.fillRect(x, 254 - 2 * r, 5, 1);
     }
 
+
+    // ================= オシロスコープ表示 =================
+    let viewMode = 'analyzer';
+    const SCOPE_W = 2560, SCOPE_H = 1440;      // 高解像度の内部サイズ
+    const SC = { PRE: 512, POST: 512, R: 1200, CP: 256, GAIN: 1.5 };
+    const scTpl = Array.from({ length: 9 }, () => new Float32Array(SC.CP * 2));
+    const scTplOk = new Array(9).fill(false);
+    let scopeLastPos = 0;
+
+    // 立ち上がりゼロクロスのうち、前フレームの波形と最も相関が高い位置に固定する
+    // (小数精度のゼロクロス位置を返すので、横方向に一切ずれない)
+    function scopeTrigger(k, buf, pos) {
+      const M = player.scopeMask, CP = SC.CP, tpl = scTpl[k];
+      const cMax = Math.floor(pos) - SC.POST - 2;
+      const cMin = Math.max(cMax - SC.R, player.scopeW - player.scopeRB + CP + SC.PRE + 8, CP + 1);
+      let et = 0;
+      if (scTplOk[k]) for (let j = 0; j < CP * 2; j += 2) et += tpl[j] * tpl[j];
+      let best = -2, bi = -1, last = -1;
+      for (let i = cMin; i <= cMax; i++) {
+        if (!(buf[i & M] <= 0 && buf[(i + 1) & M] > 0)) continue;
+        let dot = 0, ex = 0; const base = i - CP;
+        for (let j = 0; j < CP * 2; j += 2) { const v = buf[(base + j) & M]; dot += v * tpl[j]; ex += v * v; }
+        if (ex < 1e-3) continue;
+        last = i;
+        if (!scTplOk[k]) continue;
+        const sc = dot / Math.sqrt(ex * et + 1e-12);
+        if (sc > best) { best = sc; bi = i; }
+        else if (sc >= best - 0.003) bi = i;   // ほぼ同点なら新しい方
+      }
+      if (last < 0) { scTplOk[k] = false; return cMax; }
+      const locked = scTplOk[k] && best >= 0.5;
+      const i0 = locked ? bi : last;
+      const x0 = buf[i0 & M], x1 = buf[(i0 + 1) & M];
+      let c = i0 + Math.max(0, Math.min(1, -x0 / (x1 - x0)));
+      const at = (p) => {   // 3次補間(線形補間による平滑化バイアスを避ける)
+        const i = Math.floor(p), t = p - i;
+        const y0 = buf[(i - 1) & M], y1 = buf[i & M], y2 = buf[(i + 1) & M], y3 = buf[(i + 2) & M];
+        return ((( -0.5 * y0 + 1.5 * y1 - 1.5 * y2 + 0.5 * y3) * t + (y0 - 2.5 * y1 + 2 * y2 - 0.5 * y3)) * t + 0.5 * (y2 - y0)) * t + y1;
+      };
+      if (locked) {
+        // 波形の形そのものに対して小数サンプル精度で位置合わせ(ゼロクロスの揺れを吸収)
+        let bd = 0, bs = -Infinity;
+        for (let d = -2; d <= 2.0001; d += 0.125) {
+          let dot = 0, ex = 0;
+          for (let j = 0; j < CP * 2; j += 2) { const v = at(c + d - CP + j); dot += v * tpl[j]; ex += v * v; }
+          const sc = dot / Math.sqrt(ex + 1e-12);
+          if (sc > bs) { bs = sc; bd = d; }
+        }
+        c += bd;
+      }
+      for (let j = 0; j < CP * 2; j++) {
+        const v = at(c - CP + j);
+        tpl[j] = locked ? tpl[j] * 0.92 + v * 0.08 : v;   // ゆっくり追従(基準位相を固定)
+      }
+      scTplOk[k] = true;
+      return c;
+    }
+
+    function drawScope(playing) {
+      const W = canvas.width, H = canvas.height;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.imageSmoothingEnabled = true;
+      ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+      const cw = W / 3, ch = H / 3, sx = cw / (SC.PRE + SC.POST);
+      const hasData = !!(player && player.scopeW > SC.PRE + SC.POST + SC.R + 64);
+      if (hasData) { if (playing) scopeLastPos = player.getScopePos(); }
+      const pos = scopeLastPos;
+
+      // グリッド(セル中央の薄線 + セル境界の青線)
+      ctx.lineWidth = 1.5; ctx.strokeStyle = 'rgba(70,120,210,0.35)';
+      ctx.beginPath();
+      for (let c = 0; c < 3; c++) { const x = Math.round(c * cw + cw / 2) + 0.5; ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+      ctx.stroke();
+      ctx.lineWidth = 2; ctx.strokeStyle = '#2f64b4';
+      ctx.beginPath();
+      for (let c = 1; c < 3; c++) { const x = Math.round(c * cw); ctx.moveTo(x, 0); ctx.lineTo(x, H); }
+      for (let r = 1; r < 3; r++) { const y = Math.round(r * ch); ctx.moveTo(0, y); ctx.lineTo(W, y); }
+      ctx.stroke();
+
+      ctx.font = '28px "DejaVu Sans Mono", Menlo, Consolas, monospace';
+      ctx.textBaseline = 'top';
+      for (let k = 0; k < 9; k++) {
+        const cx = Math.floor(k / 3) * cw, cy = (k % 3) * ch;
+        const mid = cy + ch * 0.55, amp = ch * 0.40;
+        if (hasData) {
+          const buf = player.scopeBuf[k], M = player.scopeMask;
+          const c = scopeTrigger(k, buf, pos);
+          const gain = k < 8 ? SC.GAIN : 0.9;
+          ctx.save();
+          ctx.beginPath(); ctx.rect(cx + 2, cy + 2, cw - 4, ch - 4); ctx.clip();
+          ctx.strokeStyle = '#fff'; ctx.lineWidth = 3; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+          ctx.beginPath();
+          const j0 = Math.floor(c - SC.PRE) - 1, j1 = Math.ceil(c + SC.POST) + 1;
+          for (let j = j0; j <= j1; j++) {
+            const v = Math.max(-1.2, Math.min(1.2, buf[j & M] * gain));
+            const x = cx + (j - c + SC.PRE) * sx, y = mid - v * amp;
+            if (j === j0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          }
+          ctx.stroke();
+          ctx.restore();
+        } else {
+          ctx.strokeStyle = '#fff'; ctx.lineWidth = 3;
+          ctx.beginPath(); ctx.moveTo(cx, mid); ctx.lineTo(cx + cw, mid); ctx.stroke();
+        }
+        ctx.fillStyle = '#fff';
+        ctx.fillText(k < 8 ? `[S-DSP] VOICE ${k + 1}` : '[S-DSP] MASTER', cx + 8, cy + 6);
+      }
+    }
+
+    function setView(mode) {
+      if (isExporting) { showNotice('書き出し中は表示を切り替えられません。'); return; }
+      viewMode = mode;
+      if (mode === 'scope') {
+        canvas.width = SCOPE_W; canvas.height = SCOPE_H; canvas.classList.add('scope');
+        scTplOk.fill(false);
+      } else {
+        canvas.width = 1340; canvas.height = 670; canvas.classList.remove('scope');
+      }
+      document.getElementById('btnView').textContent = mode === 'scope' ? 'アナライザー表示' : 'オシロスコープ表示';
+    }
+    document.getElementById('btnView').addEventListener('click', () => setView(viewMode === 'scope' ? 'analyzer' : 'scope'));
+
     function drawVisualizer() {
       const now = performance.now();
       const playing = !!(player && player.playing);
       if (playing) playMs += now - lastT;
       lastT = now; frameNo++;
+
+      if (viewMode === 'scope') {
+        drawScope(playing);
+        animationFrameId = requestAnimationFrame(drawVisualizer);
+        return;
+      }
 
       ctx.save();
       ctx.scale(2, 2);
