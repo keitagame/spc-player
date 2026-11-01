@@ -2,6 +2,61 @@
 // SPC Player Library (Web Audio API / Main Thread)
 // ============================================================================
 
+// ----------------------------------------------------------------------------
+// ざらつき低減設定（ここだけ触れば調整できます）
+// ----------------------------------------------------------------------------
+const SMOOTH_CONFIG = {
+  // ボイス補間: ウィンドウドsincのタップ数 (最大16)。多いほど折り返し/ジャリ感が減る
+  interpTaps: 16,
+  // 補間のカットオフ (1.0 = 16kHz)。下げるほど滑らか／こもる
+  interpCutoff: 0.86,
+  // 出力ローパス (4次バターワース = 2段Biquad)
+  lowpassHz: 9000,
+  // 出力ゲイン (旧: tanh飽和 x4 → 歪みの主因。リミッタ併用なので 3 前後が目安)
+  outputGain: 3.0,
+  // リミッタ天井 / リリース係数 (32kHzで毎サンプル適用)
+  limiterCeil: 0.98,
+  limiterRelease: 0.9998,
+  // 既存の「臨場感」エフェクト (コムフィルタ的な金属感が気になる場合は false)
+  earlyReflections: true,
+  stereoWidth: 1.3,
+  // 出力側 32kHz→AudioContext レート変換のsincタップ数
+  resampleTaps: 8
+};
+
+function _besselI0(x) {
+  let sum = 1, term = 1;
+  for (let k = 1; k < 40; k++) {
+    term *= (x / (2 * k)) * (x / (2 * k));
+    sum += term;
+    if (term < 1e-12 * sum) break;
+  }
+  return sum;
+}
+
+// Kaiser窓付きsincの分数遅延テーブルを作る。tap k は位置 (1 - half + k) - t に対応
+function buildKaiserSincTable(taps, phases, cutoff, beta) {
+  const half = taps / 2;
+  const table = new Float32Array(phases * taps);
+  const i0b = _besselI0(beta);
+  for (let p = 0; p < phases; p++) {
+    const t = p / phases;
+    let sum = 0;
+    for (let k = 0; k < taps; k++) {
+      const x = (1 - half + k) - t;
+      const fx = x * cutoff;
+      const sinc = Math.abs(fx) < 1e-9 ? 1 : Math.sin(Math.PI * fx) / (Math.PI * fx);
+      const r = x / half;
+      const win = Math.abs(r) >= 1 ? 0 : _besselI0(beta * Math.sqrt(1 - r * r)) / i0b;
+      const w = sinc * win;
+      table[p * taps + k] = w;
+      sum += w;
+    }
+    for (let k = 0; k < taps; k++) table[p * taps + k] /= sum; // 直流ゲイン=1
+  }
+  return table;
+}
+
 /**
  * SPC700 CPU Emulator
  */
@@ -61,7 +116,7 @@ class EarlyReflections {
 }
 
 // ステレオ感を自然に広げる Mid-Side エンハンサー
-function applyStereoEnhancer(inL, inR, width = 1.3) {
+function applyStereoEnhancer(inL, inR, width = SMOOTH_CONFIG.stereoWidth) {
   const mid = (inL + inR) * 0.5;
   const side = (inL - inR) * 0.5 * width;
   return [mid + side, mid - side];
@@ -689,13 +744,13 @@ class SPC700 {
   }
 }
 // --- 定数変更 (7kHzから12kHzへ引き上げて音抜けを改善) ---
-const LP_CUTOFF_HZ = 8000;
+const LP_CUTOFF_HZ = SMOOTH_CONFIG.lowpassHz;
 
 // 2次Biquadローパスフィルタークラス
 class BiquadLPF {
-  constructor(cutoff, sampleRate) {
+  constructor(cutoff, sampleRate, Q = 0.7071) {
     const w0 = 2 * Math.PI * cutoff / sampleRate;
-    const alpha = Math.sin(w0) / (2 * 0.707); // Q = 0.707 (Butterworth特性)
+    const alpha = Math.sin(w0) / (2 * Q);
     const cosw0 = Math.cos(w0);
 
     const b0 = (1 - cosw0) / 2;
@@ -723,6 +778,16 @@ class BiquadLPF {
     return y;
   }
 }
+// 4次バターワース (Q = 0.5412 / 1.3066 の2段直列): 通過域は平坦、高域ノイズだけ急峻に落とす
+class LPF4 {
+  constructor(cutoff, sampleRate) {
+    this.a = new BiquadLPF(cutoff, sampleRate, 0.5412);
+    this.b = new BiquadLPF(cutoff, sampleRate, 1.3066);
+  }
+  reset() { this.a.reset(); this.b.reset(); }
+  process(x) { return this.b.process(this.a.process(x)); }
+}
+
 /**
  * SNES DSP (S-DSP) Emulator
  */
@@ -730,6 +795,13 @@ const SDSP_RATE = 32000;
 const OUTPUT_HEADROOM = 1.0;
 
 const LP_ALPHA = 1 - Math.exp(-2 * Math.PI * LP_CUTOFF_HZ / SDSP_RATE);
+
+function finalSoftClip(x) {
+  const t = 0.92, ax = Math.abs(x);
+  if (ax <= t) return x;
+  const y = t + (1 - t) * Math.tanh((ax - t) / (1 - t));
+  return x < 0 ? -y : y;
+}
 
 function softClip(x) {
   const t = 0.6;
@@ -748,61 +820,11 @@ const COUNTER_RATES = [
   0, 2048, 1536, 1280, 1024, 768, 640, 512, 384, 320, 256, 192,
   160, 128, 96, 80, 64, 48, 40, 32, 24, 20, 16, 12, 10, 8, 6, 5, 4, 3, 2, 1
 ];
-// --- タップ数の設定（6 または 8 などを指定）---
-const TAPS = 4; 
+// --- ボイス補間: 高次Kaiser窓sinc / 位相4096段 (旧: 4タップ・256段で位相量子化ノイズが出ていた) ---
+const TAPS = Math.max(4, Math.min(16, SMOOTH_CONFIG.interpTaps | 0));
 const HALF_TAPS = TAPS / 2;
-const FC = 0.6; 
-
-const SINC_TABLE = (() => {
-  const table = new Float32Array(256 * TAPS);
-
-  
-  const sinc = (x) => {
-    const fx = x * FC;
-    if (Math.abs(fx) < 1e-6) return 1.0;
-    const px = Math.PI * fx;
-    return Math.sin(px) / px;
-  };
-
-  // Hann 窓
-  const hannWindow = (x) => {
-    return 0.5 + 0.5 * Math.cos((Math.PI * x) / HALF_TAPS);
-  };
-
-  // Blackman 窓 (より強力に高周波の減衰・サイドローブ抑制を行いたい場合)
-  const blackmanWindow = (x) => {
-    return 0.42 + 0.5 * Math.cos((Math.PI * x) / HALF_TAPS) + 0.08 * Math.cos((2 * Math.PI * x) / HALF_TAPS);
-  };
-
-  const windowedSinc = (x) => {
-    const ax = Math.abs(x);
-    if (ax >= HALF_TAPS) return 0.0;
-    
-    // 【選択】Hann 窓または Blackman 窓を選択
-    //return sinc(x) * hannWindow(x);
-    return sinc(x) * blackmanWindow(x);
-  };
-
-  for (let i = 0; i < 256; i++) {
-    const t = i / 256.0;
-    let sum = 0;
-
-    // TAPS分の重みを計算
-    for (let k = 0; k < TAPS; k++) {
-      const x = (1 - HALF_TAPS + k) - t;
-      const w = windowedSinc(x);
-      table[i * TAPS + k] = w;
-      sum += w;
-    }
-
-    // 重みの正規化（音量の変動・歪みを防止）
-    for (let k = 0; k < TAPS; k++) {
-      table[i * TAPS + k] /= sum;
-    }
-  }
-  return table;
-})();
-
+const SINC_PHASES = 4096;
+const SINC_TABLE = buildKaiserSincTable(TAPS, SINC_PHASES, SMOOTH_CONFIG.interpCutoff, 8.0);
 
 class DSP {
   constructor(ram) {
@@ -840,14 +862,15 @@ class DSP {
 
     this.echoOffset = 0;
     this.echoLength = 4;
-    this.firHistL = new Int32Array(8);
-    this.firHistR = new Int32Array(8);
+    this.firHistL = new Float64Array(8);
+    this.firHistR = new Float64Array(8);
+    this.limEnv = 0; this.limGain = 1;
     this.firPos = 0;
 
     this.dcPrevInL = 0; this.dcPrevOutL = 0;
     this.dcPrevInR = 0; this.dcPrevOutR = 0;
-    this.lpfL = new BiquadLPF(LP_CUTOFF_HZ, SDSP_RATE);
-    this.lpfR = new BiquadLPF(LP_CUTOFF_HZ, SDSP_RATE);
+    this.lpfL = new LPF4(LP_CUTOFF_HZ, SDSP_RATE);
+    this.lpfR = new LPF4(LP_CUTOFF_HZ, SDSP_RATE);
   }
 
   reset() {
@@ -859,6 +882,7 @@ class DSP {
     this.echoLength = 4;
     this.lpfL.reset();
     this.lpfR.reset();
+    this.limEnv = 0; this.limGain = 1;
     this.er.reset();
     this.firHistL.fill(0); this.firHistR.fill(0); this.firPos = 0;
     this.dcPrevInL = this.dcPrevOutL = this.dcPrevInR = this.dcPrevOutR = 0;
@@ -1108,33 +1132,25 @@ getVoiceRegisters(v) {
     let inR = ram[(base + 2) & 0xffff] | (ram[(base + 3) & 0xffff] << 8); inR = (inR << 16) >> 16;
 
     const hl = this.firHistL, hr = this.firHistR, fp = this.firPos;
-    hl[fp] = inL >> 1; hr[fp] = inR >> 1;
+    hl[fp] = inL; hr[fp] = inR;
     this.firPos = (fp + 1) & 7;
 
+    // FIRは浮動小数で計算 (旧: >>1, >>6, &~1 の連続切り捨てがフィードバックで蓄積しザラついていた)
     let fl = 0, fr = 0;
-    for (let t = 0; t < 7; t++) {
+    for (let t = 0; t < 8; t++) {
       const idx = (this.firPos + t) & 7;
-      const c = this.fir(t);
-      fl += (hl[idx] * c) >> 6;
-      fr += (hr[idx] * c) >> 6;
-    }
-    {
-      const idx = (this.firPos + 7) & 7;
-      const c = this.fir(7);
-      fl = (fl << 16) >> 16; fr = (fr << 16) >> 16;
-      fl += (hl[idx] * c) >> 6;
-      fr += (hr[idx] * c) >> 6;
+      const c = this.fir(t) / 128;
+      fl += hl[idx] * c;
+      fr += hr[idx] * c;
     }
     if (fl > 32767) fl = 32767; else if (fl < -32768) fl = -32768;
     if (fr > 32767) fr = 32767; else if (fr < -32768) fr = -32768;
-    fl &= ~1; fr &= ~1;
 
     if (!(this.flg & 0x20)) {
-      let wl = eMixL + ((fl * this.efb) >> 7);
-      let wr = eMixR + ((fr * this.efb) >> 7);
+      let wl = Math.round(eMixL + (fl * this.efb) / 128);
+      let wr = Math.round(eMixR + (fr * this.efb) / 128);
       if (wl > 32767) wl = 32767; else if (wl < -32768) wl = -32768;
       if (wr > 32767) wr = 32767; else if (wr < -32768) wr = -32768;
-      wl &= ~1; wr &= ~1;
       ram[base]                = wl & 0xff;
       ram[(base + 1) & 0xffff] = (wl >> 8) & 0xff;
       ram[(base + 2) & 0xffff] = wr & 0xff;
@@ -1196,8 +1212,8 @@ getVoiceRegisters(v) {
       if (voice.envMode === 'kon-delay') {
         if (voice.brrOffset >= 16) {
           this.decodeBrrBlock(voice, voice.brrAddr, i);
-          voice.interp[0] = 0; voice.interp[1] = 0; voice.interp[2] = 0;
-          voice.interp[3] = voice.decodedBlock[0];
+          voice.interp.fill(0);
+          voice.interp[TAPS - 1] = voice.decodedBlock[0];
           voice.brrOffset = 1;
         }
         voice.outSample = 0;
@@ -1215,7 +1231,7 @@ getVoiceRegisters(v) {
       }
       if (p > 0x3fff) p = 0x3fff;
 
-      const gi = (voice.pitchCounter >> 4) & 0xff;
+      const gi = voice.pitchCounter & 0xfff; // 12bit全精度で位相を引く
       const stIdx = gi * TAPS;
       const ip = voice.interp;
 
@@ -1225,7 +1241,7 @@ getVoiceRegisters(v) {
       }
 
       if (gs > 32767) gs = 32767; else if (gs < -32768) gs = -32768;
-      let sample = Math.round(gs) >> 1;
+      let sample = gs * 0.5; // 丸めない (旧: Math.round で量子化ノイズ)
 
       if (this.non & bit) {
   // 15bit LFSRの最下位ビットから適切な振幅（±16384）を作る
@@ -1233,16 +1249,15 @@ getVoiceRegisters(v) {
 }
 
       const env = this.stepEnvelope(voice, i);
-      sample = (sample * env) >> 11;
+      sample = (sample * env) / 2048; // 切り捨てない (旧: >>11 でジッパーノイズ)
 
       voice.outSample = sample;
 
-      const vl = (sample * this.volL(i)) >> 7;
-      const vr = (sample * this.volR(i)) >> 7;
+      const vl = (sample * this.volL(i)) / 128;
+      const vr = (sample * this.volR(i)) / 128;
       mixL += vl;
       mixR += vr;
-      if (mixL > 32767) mixL = 32767; else if (mixL < -32768) mixL = -32768;
-      if (mixR > 32767) mixR = 32767; else if (mixR < -32768) mixR = -32768;
+      // ボイス合算の途中ハードクリップは廃止 (最終段のリミッタで処理)
       if (this.eon & bit) {
         eMixL += vl;
         eMixR += vr;
@@ -1272,18 +1287,17 @@ getVoiceRegisters(v) {
           voice.brrOffset = 0;
         }
         const ip2 = voice.interp;
-        ip2[0] = ip2[1]; ip2[1] = ip2[2]; ip2[2] = ip2[3];
-        ip2[3] = voice.decodedBlock[voice.brrOffset];
+        for (let k = 0; k < TAPS - 1; k++) ip2[k] = ip2[k + 1];
+        ip2[TAPS - 1] = voice.decodedBlock[voice.brrOffset];
         voice.brrOffset++;
       }
     }
 
     const [echoOutL, echoOutR] = this._echoStep(eMixL, eMixR);
 
-    let dl = ((mixL * this.mvolL) >> 7) + ((echoOutL * this.evolL) >> 7);
-    let dr = ((mixR * this.mvolR) >> 7) + ((echoOutR * this.evolR) >> 7);
-    if (dl > 32767) dl = 32767; else if (dl < -32768) dl = -32768;
-    if (dr > 32767) dr = 32767; else if (dr < -32768) dr = -32768;
+    // 浮動小数のまま合成 (ここでのハードクリップ・切り捨ては廃止)
+    let dl = (mixL * this.mvolL) / 128 + (echoOutL * this.evolL) / 128;
+    let dr = (mixR * this.mvolR) / 128 + (echoOutR * this.evolR) / 128;
 
     // 1. 正規化
     let outL = dl / 32768.0;
@@ -1292,14 +1306,15 @@ getVoiceRegisters(v) {
     if (this.flg & 0x40) { outL = 0; outR = 0; }
 
     // 2. 空間アーリーリフレクション（空間の奥行き・部屋の残響感を付与）
-    [outL, outR] = this.er.process(outL, outR);
+    if (SMOOTH_CONFIG.earlyReflections) [outL, outR] = this.er.process(outL, outR);
 
     // 3. ステレオエンハンサー（横方向の音場の広がりを強調）
     [outL, outR] = applyStereoEnhancer(outL, outR, 1.3);
 
     
-    outL = analogSaturation(outL) * 4;
-    outR = analogSaturation(outR) * 4;
+    // 旧: tanh飽和 x4 (ピークが2.9まで膨らみ、出力側でハードクリップ → ジャリジャリの主因)
+    outL *= SMOOTH_CONFIG.outputGain;
+    outR *= SMOOTH_CONFIG.outputGain;
 
     // 5. DCオフセット除去フィルター
     {
@@ -1314,6 +1329,16 @@ getVoiceRegisters(v) {
     {
       outL = this.lpfL.process(outL);
       outR = this.lpfR.process(outR);
+    }
+
+    // トランスペアレントなピークリミッタ (即時アタック・ゆっくりリリース) + 最終ソフトクリップ
+    {
+      const pk = Math.max(Math.abs(outL), Math.abs(outR));
+      this.limEnv = pk > this.limEnv ? pk : this.limEnv * SMOOTH_CONFIG.limiterRelease;
+      const target = this.limEnv > SMOOTH_CONFIG.limiterCeil ? SMOOTH_CONFIG.limiterCeil / this.limEnv : 1;
+      this.limGain += (target - this.limGain) * (target < this.limGain ? 0.5 : 0.0005);
+      outL = finalSoftClip(outL * this.limGain);
+      outR = finalSoftClip(outR * this.limGain);
     }
     return [outL, outR];
   
@@ -1458,6 +1483,11 @@ class SPCEngine {
  */
 const SDSP_SAMPLE_RATE = 32000;
 
+// 出力側リサンプラ: Catmull-Rom 3次補間 → Kaiser窓sinc (旧: 高域イメージが残りジャリつく)
+const RS_TAPS = Math.max(4, Math.min(32, SMOOTH_CONFIG.resampleTaps | 0));
+const RS_PHASES = 1024;
+const RS_TABLE = buildKaiserSincTable(RS_TAPS, RS_PHASES, 1.0, 7.0);
+
 class SPCPlayer {
   constructor(audioCtx, destination) {
     this.audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
@@ -1468,8 +1498,8 @@ class SPCPlayer {
     this.resampleRatio = SDSP_SAMPLE_RATE / this.audioCtx.sampleRate;
     this.srcPos = 0;
 
-    this.hL = new Float64Array(4);
-    this.hR = new Float64Array(4);
+    this.hL = new Float64Array(RS_TAPS);
+    this.hR = new Float64Array(RS_TAPS);
     this.haveSample = false;
 
     this.fade = 0;
@@ -1602,10 +1632,9 @@ class SPCPlayer {
 
   _advanceDspSample() {
     const hL = this.hL, hR = this.hR;
-    hL[0] = hL[1]; hL[1] = hL[2]; hL[2] = hL[3];
-    hR[0] = hR[1]; hR[1] = hR[2]; hR[2] = hR[3];
+    for (let k = 0; k < RS_TAPS - 1; k++) { hL[k] = hL[k + 1]; hR[k] = hR[k + 1]; }
     const [l, r] = this.engine.renderSample();
-    hL[3] = l; hR[3] = r;
+    hL[RS_TAPS - 1] = l; hR[RS_TAPS - 1] = r;
     this.playedSamples++; // 再生サンプル数をカウント
   }
 
@@ -1657,7 +1686,7 @@ class SPCPlayer {
     }
 
     if (!this.haveSample) {
-      for (let k = 0; k < 4; k++) this._advanceDspSample();
+      for (let k = 0; k < RS_TAPS; k++) this._advanceDspSample();
       this.haveSample = true;
     }
 
@@ -1672,8 +1701,13 @@ class SPCPlayer {
         this.srcPos -= 1.0;
       }
 
-      const l = SPCPlayer._cubic(hL[0], hL[1], hL[2], hL[3], this.srcPos);
-      const r = SPCPlayer._cubic(hR[0], hR[1], hR[2], hR[3], this.srcPos);
+      const base = ((this.srcPos * RS_PHASES) | 0) * RS_TAPS;
+      let l = 0, r = 0;
+      for (let k = 0; k < RS_TAPS; k++) {
+        const w = RS_TABLE[base + k];
+        l += hL[k] * w;
+        r += hR[k] * w;
+      }
 
       if (fade !== fadeTarget) {
         if (fade < fadeTarget) fade = Math.min(fadeTarget, fade + fadeStep);
