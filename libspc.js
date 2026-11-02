@@ -9,17 +9,17 @@ const SMOOTH_CONFIG = {
   // ボイス補間: ウィンドウドsincのタップ数 (最大16)。多いほど折り返し/ジャリ感が減る
   interpTaps: 16,
   // 補間のカットオフ (1.0 = 16kHz)。下げるほど滑らか／こもる
-  interpCutoff: 0.86,
+  interpCutoff: 0.55,
   // 出力ローパス (4次バターワース = 2段Biquad)
-  lowpassHz: 9000,
+  lowpassHz: 6500,
   // 出力ゲイン (旧: tanh飽和 x4 → 歪みの主因。リミッタ併用なので 3 前後が目安)
   outputGain: 3.0,
   // リミッタ天井 / リリース係数 (32kHzで毎サンプル適用)
   limiterCeil: 0.98,
   limiterRelease: 0.9998,
   // 既存の「臨場感」エフェクト (コムフィルタ的な金属感が気になる場合は false)
-  earlyReflections: true,
-  stereoWidth: 1.3,
+  earlyReflections: false,
+  stereoWidth: 1.0,
   // 出力側 32kHz→AudioContext レート変換のsincタップ数
   resampleTaps: 8
 };
@@ -1309,7 +1309,7 @@ getVoiceRegisters(v) {
     if (SMOOTH_CONFIG.earlyReflections) [outL, outR] = this.er.process(outL, outR);
 
     // 3. ステレオエンハンサー（横方向の音場の広がりを強調）
-    [outL, outR] = applyStereoEnhancer(outL, outR, 1.3);
+    [outL, outR] = applyStereoEnhancer(outL, outR, SMOOTH_CONFIG.stereoWidth);
 
     
     // 旧: tanh飽和 x4 (ピークが2.9まで膨らみ、出力側でハードクリップ → ジャリジャリの主因)
