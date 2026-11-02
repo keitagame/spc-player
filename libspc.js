@@ -1483,6 +1483,9 @@ class SPCEngine {
  */
 const SDSP_SAMPLE_RATE = 32000;
 
+// オシロスコープ用リングバッファ (32kHz DSPサンプル単位 / 2のべき乗)
+const SCOPE_RB = 65536;
+
 // 出力側リサンプラ: Catmull-Rom 3次補間 → Kaiser窓sinc (旧: 高域イメージが残りジャリつく)
 const RS_TAPS = Math.max(4, Math.min(32, SMOOTH_CONFIG.resampleTaps | 0));
 const RS_PHASES = 1024;
@@ -1515,6 +1518,14 @@ class SPCPlayer {
     this.rawBuffer = null;      // 高速再構築用のArrayBufferキャッシュ
     this.playedSamples = 0;     // 内部生成したDSPサンプル数(32kHz基準)
     this.isSeeking = false;     // シーク処理中フラグ
+
+    // --- オシロスコープ用 (index.html の drawScope が参照) ---
+    // scopeBuf[0..7] = 各ボイス出力 / scopeBuf[8] = マスター(L+R)/2
+    this.scopeRB = SCOPE_RB;
+    this.scopeMask = SCOPE_RB - 1;
+    this.scopeBuf = Array.from({ length: 9 }, () => new Float32Array(SCOPE_RB));
+    this.scopeW = 0;            // 書き込み済みDSPサンプル総数 (単調増加)
+    this._scopeMarks = [];      // 再生時刻と scopeW の対応表
   }
 
   /**
@@ -1544,6 +1555,7 @@ class SPCPlayer {
     this.hL.fill(0); this.hR.fill(0);
     this.fade = 0;
     this.playedSamples = 0;
+    this._resetScope();
     return parsed.meta;
   }
 
@@ -1572,6 +1584,7 @@ class SPCPlayer {
       this.engine.renderSample();
     }
 
+    this._resetScope();
     this.playedSamples = targetSamples;
     this.isSeeking = false;
 
@@ -1583,6 +1596,34 @@ class SPCPlayer {
 
   getVoiceStates() {
     return this.engine.dsp.getAllVoiceStates();
+  }
+
+  _resetScope() {
+    for (let k = 0; k < 9; k++) this.scopeBuf[k].fill(0);
+    this.scopeW = 0;
+    this._scopeMarks.length = 0;
+  }
+
+  // _process の各ブロック先頭で呼ぶ: 「この時刻に再生されるDSP位置」を記録
+  _scopeMark(e) {
+    const t = (e && typeof e.playbackTime === 'number' && e.playbackTime > 0)
+      ? e.playbackTime : this.audioCtx.currentTime;
+    const a = this._scopeMarks;
+    a.push({ t, w: this.scopeW });
+    if (a.length > 16) a.shift();
+  }
+
+  // 現在「聞こえている」位置に相当するDSPサンプル位置 (≤ scopeW)
+  getScopePos() {
+    const a = this._scopeMarks;
+    if (!a.length) return this.scopeW;
+    const now = this.audioCtx.currentTime - (this.audioCtx.outputLatency || 0);
+    let m = a[0];
+    for (let i = a.length - 1; i >= 0; i--) {
+      if (a[i].t <= now) { m = a[i]; break; }
+    }
+    const p = m.w + Math.max(0, now - m.t) * SDSP_SAMPLE_RATE;
+    return Math.min(p, this.scopeW);
   }
 
   /**
@@ -1636,6 +1677,17 @@ class SPCPlayer {
     const [l, r] = this.engine.renderSample();
     hL[RS_TAPS - 1] = l; hR[RS_TAPS - 1] = r;
     this.playedSamples++; // 再生サンプル数をカウント
+
+    // オシロスコープ用に波形を記録 (ボイスはボリューム適用後のL/R平均、満振幅=1.0)
+    {
+      const dsp = this.engine.dsp, vs = dsp.voices, sb = this.scopeBuf;
+      const w = this.scopeW & this.scopeMask;
+      for (let i = 0; i < 8; i++) {
+        sb[i][w] = ((vs[i].outSample || 0) * (dsp.volL(i) + dsp.volR(i)) / 256) / 16384;
+      }
+      sb[8][w] = (l + r) * 0.5;
+      this.scopeW++;
+    }
   }
 
   static _cubic(y0, y1, y2, y3, t) {
@@ -1689,6 +1741,8 @@ class SPCPlayer {
       for (let k = 0; k < RS_TAPS; k++) this._advanceDspSample();
       this.haveSample = true;
     }
+
+    this._scopeMark(e);
 
     const hL = this.hL, hR = this.hR;
     const ratio = this.resampleRatio;
