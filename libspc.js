@@ -9,9 +9,9 @@ const SMOOTH_CONFIG = {
   // ボイス補間: ウィンドウドsincのタップ数 (最大16)。多いほど折り返し/ジャリ感が減る
   interpTaps: 16,
   // 補間のカットオフ (1.0 = 16kHz)。下げるほど滑らか／こもる
-  interpCutoff: 0.55,
+  interpCutoff: 0.92,
   // 出力ローパス (4次バターワース = 2段Biquad)
-  lowpassHz: 6500,
+  lowpassHz: 12500,
   // 出力ゲイン (旧: tanh飽和 x4 → 歪みの主因。リミッタ併用なので 3 前後が目安)
   outputGain: 3.0,
   // リミッタ天井 / リリース係数 (32kHzで毎サンプル適用)
